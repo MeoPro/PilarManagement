@@ -12,35 +12,17 @@ return new class extends Migration
             $table->id();
 
             $table->string('order_id')->unique();
+
             $table->string('guest_name');
-            $table->string('phone');
+            $table->string('phone')->nullable();
 
-            // Menyimpan list barang dalam bentuk JSON
-            $table->json('items')->nullable();
+            $table->decimal('total_order', 15, 2)->default(0);
 
-            $table->string('color')->nullable();
-
-            // Tanggal gambar dikirim melalui WhatsApp
-            $table->date('image_date')->nullable();
-
-            // File gambar
-            $table->string('image')->nullable();
-
-            // Deadline order
             $table->date('deadline')->nullable();
 
-            // 0 = normal, 1 = urgent
-            $table->boolean('urgent')->default(false);
+            $table->dateTime('last_edit')->nullable();
 
-            $table->enum('status', [
-                'Pending',
-                'Design',
-                'Production',
-                'Finishing',
-                'Ready',
-                'Completed',
-                'Cancelled'
-            ])->default('Pending');
+            $table->string('status')->default('None');
 
             $table->text('note')->nullable();
 

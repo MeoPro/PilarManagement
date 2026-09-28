@@ -2,389 +2,812 @@
 <html lang="en">
 
 <head>
+
     <meta charset="UTF-8">
 
-    <title>Add Order</title>
+    <title>Create Order</title>
 
     <style>
 
         body {
             font-family: Arial, sans-serif;
-            background: #f5f6f8;
-            padding: 30px;
+            margin: 30px;
+            background: #f5f5f5;
         }
 
         .container {
-            max-width: 900px;
+            max-width: 1300px;
             margin: auto;
+        }
+
+        .card {
             background: white;
-            padding: 30px;
-            border-radius: 10px;
-        }
-
-        .form-group {
-            margin-bottom: 18px;
-        }
-
-        label {
-            display: block;
-            margin-bottom: 7px;
-            font-weight: bold;
+            padding: 25px;
+            margin-bottom: 20px;
+            border-radius: 8px;
         }
 
         input,
-        textarea,
-        select {
+        select,
+        textarea {
+            padding: 9px;
             width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
             box-sizing: border-box;
         }
 
-        textarea {
-            min-height: 100px;
+        label {
+            font-weight: bold;
+            display: block;
+            margin-bottom: 5px;
         }
 
-        .item {
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 8px;
+            border: 1px solid #ddd;
+        }
+
+        .btn {
+            padding: 9px 14px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: #222;
+            color: white;
+        }
+
+        .btn-success {
+            background: #198754;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .category-wrapper {
             display: flex;
-            gap: 10px;
-            margin-bottom: 10px;
+            gap: 5px;
         }
 
-        .item input:first-child {
-            flex: 3;
-        }
-
-        .item input:nth-child(2) {
+        .category-wrapper select {
             flex: 1;
         }
 
-        .remove-item {
-            background: #dc3545;
-            color: white;
-            border: none;
-            padding: 0 15px;
-            border-radius: 5px;
-            cursor: pointer;
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
         }
 
-        .add-item {
-            background: #198754;
-            color: white;
-            border: none;
-            padding: 10px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-
-        .btn-save {
-            background: #222;
-            color: white;
-            border: none;
-            padding: 12px 20px;
-            border-radius: 6px;
-            cursor: pointer;
-        }
-
-        .back {
-            display: inline-block;
-            margin-bottom: 20px;
-            text-decoration: none;
-            color: #333;
-        }
-
-        .error {
-            background: #f8d7da;
-            color: #842029;
-            padding: 15px;
-            margin-bottom: 20px;
-            border-radius: 6px;
+        .modal-content {
+            background: white;
+            padding: 25px;
+            width: 400px;
+            border-radius: 8px;
         }
 
     </style>
+
 </head>
 
 <body>
 
 <div class="container">
 
-    <a href="{{ route('orders.index') }}" class="back">
-        ← Back to Orders
-    </a>
-
-    <h1>Add Order</h1>
+    <h1>Create Order</h1>
 
     @if($errors->any())
 
-        <div class="error">
+        <div style="color:red;">
 
             <ul>
+
                 @foreach($errors->all() as $error)
+
                     <li>{{ $error }}</li>
+
                 @endforeach
+
             </ul>
 
         </div>
 
     @endif
 
-    <form action="{{ route('orders.store') }}"
-          method="POST"
-          enctype="multipart/form-data">
+
+    <form
+        action="{{ route('orders.store') }}"
+        method="POST"
+        enctype="multipart/form-data"
+    >
 
         @csrf
 
-        <div class="form-group">
 
-            <label>Order ID</label>
+        {{-- ========================= --}}
+        {{-- ORDER INFORMATION --}}
+        {{-- ========================= --}}
 
-            <input
-                type="text"
-                name="order_id"
-                value="{{ old('order_id', 'ORD-' . date('Ymd-His')) }}"
-                required
-            >
+        <div class="card">
 
-        </div>
+            <h2>Order Information</h2>
 
-        <div class="form-group">
+            <div class="row">
 
-            <label>Tamu</label>
+                <div class="form-group">
 
-            <input
-                type="text"
-                name="guest_name"
-                value="{{ old('guest_name') }}"
-                required
-            >
-
-        </div>
-
-        <div class="form-group">
-
-            <label>No. Telpon</label>
-
-            <input
-                type="text"
-                name="phone"
-                value="{{ old('phone') }}"
-                required
-            >
-
-        </div>
-
-        <div class="form-group">
-
-            <label>List Barang</label>
-
-            <div id="items">
-
-                <div class="item">
+                    <label>Order ID</label>
 
                     <input
                         type="text"
-                        name="items[0][name]"
-                        placeholder="Nama barang"
+                        name="order_id"
+                        value="{{ old('order_id') }}"
+                        required
                     >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>Tamu</label>
 
                     <input
-                        type="number"
-                        name="items[0][quantity]"
-                        placeholder="Qty"
-                        min="1"
-                        value="1"
+                        type="text"
+                        name="guest_name"
+                        value="{{ old('guest_name') }}"
+                        required
                     >
 
-                    <button
-                        type="button"
-                        class="remove-item"
-                        onclick="removeItem(this)">
-                        X
-                    </button>
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>No. Telpon</label>
+
+                    <input
+                        type="text"
+                        name="phone"
+                        value="{{ old('phone') }}"
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>Deadline</label>
+
+                    <input
+                        type="date"
+                        name="deadline"
+                        value="{{ old('deadline') }}"
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>Status Order</label>
+
+                    <select name="status">
+
+                        <option value="None">
+                            None
+                        </option>
+
+                        <option value="Proses Produksi">
+                            Proses Produksi
+                        </option>
+
+                        <option value="Finishing">
+                            Finishing
+                        </option>
+
+                        <option value="Selesai">
+                            Selesai
+                        </option>
+
+                        <option value="Cancel">
+                            Cancel
+                        </option>
+
+                    </select>
 
                 </div>
 
             </div>
 
-            <button
-                type="button"
-                class="add-item"
-                onclick="addItem()">
 
-                + Tambah Barang
+            <div class="form-group">
 
-            </button>
+                <label>Note</label>
 
-        </div>
+                <textarea
+                    name="note"
+                    rows="4"
+                >{{ old('note') }}</textarea>
 
-        <div class="form-group">
-
-            <label>Warna</label>
-
-            <input
-                type="text"
-                name="color"
-                value="{{ old('color') }}"
-                placeholder="Contoh: Natural Teak"
-            >
+            </div>
 
         </div>
 
-        <div class="form-group">
 
-            <label>Tanggal Gambar</label>
+        {{-- ========================= --}}
+        {{-- PRODUCTS --}}
+        {{-- ========================= --}}
 
-            <input
-                type="date"
-                name="image_date"
-                value="{{ old('image_date') }}"
-            >
+        <div class="card">
 
-        </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
 
-        <div class="form-group">
+                <h2>List Produk</h2>
 
-            <label>Gambar dari WhatsApp</label>
-
-            <input
-                type="file"
-                name="image"
-                accept="image/*"
-            >
-
-        </div>
-
-        <div class="form-group">
-
-            <label>Deadline</label>
-
-            <input
-                type="date"
-                name="deadline"
-                value="{{ old('deadline') }}"
-            >
-
-        </div>
-
-        <div class="form-group">
-
-            <label>
-
-                <input
-                    type="checkbox"
-                    name="urgent"
-                    value="1"
-                    style="width:auto;"
-                    {{ old('urgent') ? 'checked' : '' }}
+                <button
+                    type="button"
+                    class="btn btn-success"
+                    onclick="addProduct()"
                 >
+                    + Add Product
+                </button>
 
-                Urgent
+            </div>
 
-            </label>
+
+            <table>
+
+                <thead>
+
+                    <tr>
+
+                        <th>Produk</th>
+
+                        <th>Category</th>
+
+                        <th>Qty</th>
+
+                        <th>Harga</th>
+
+                        <th>Warna</th>
+
+                        <th>Sumber</th>
+
+                        <th>Status</th>
+
+                        <th>Gambar</th>
+
+                        <th>Action</th>
+
+                    </tr>
+
+                </thead>
+
+
+                <tbody id="product-container">
+
+                    {{-- Product row generated by JS --}}
+
+                </tbody>
+
+            </table>
+
+
+            <div style="text-align:right;margin-top:20px;">
+
+                <h2>
+                    Total:
+                    Rp <span id="total-display">0</span>
+                </h2>
+
+            </div>
 
         </div>
 
-        <div class="form-group">
 
-            <label>Status</label>
-
-            <select name="status">
-
-                @foreach([
-                    'Pending',
-                    'Design',
-                    'Production',
-                    'Finishing',
-                    'Ready',
-                    'Completed',
-                    'Cancelled'
-                ] as $status)
-
-                    <option
-                        value="{{ $status }}"
-                        {{ old('status', 'Pending') == $status ? 'selected' : '' }}>
-
-                        {{ $status }}
-
-                    </option>
-
-                @endforeach
-
-            </select>
-
-        </div>
-
-        <div class="form-group">
-
-            <label>Note</label>
-
-            <textarea
-                name="note"
-                placeholder="Catatan order..."
-            >{{ old('note') }}</textarea>
-
-        </div>
-
-        <button type="submit" class="btn-save">
+        <button
+            type="submit"
+            class="btn btn-primary"
+        >
             Save Order
         </button>
+
+
+        <a
+            href="{{ route('orders.index') }}"
+            class="btn btn-secondary"
+        >
+            Cancel
+        </a>
 
     </form>
 
 </div>
 
-<script>
 
-let itemIndex = 1;
+{{-- ====================================== --}}
+{{-- MODAL ADD CATEGORY --}}
+{{-- ====================================== --}}
 
-function addItem() {
+<div
+    id="categoryModal"
+    class="modal"
+>
 
-    const container = document.getElementById('items');
+    <div class="modal-content">
 
-    const div = document.createElement('div');
+        <h2>Add New Category</h2>
 
-    div.className = 'item';
+        <div id="category-error" style="color:red;"></div>
 
-    div.innerHTML = `
-        <input
-            type="text"
-            name="items[${itemIndex}][name]"
-            placeholder="Nama barang"
-            required
-        >
+        <div class="form-group">
 
-        <input
-            type="number"
-            name="items[${itemIndex}][quantity]"
-            placeholder="Qty"
-            min="1"
-            value="1"
-            required
-        >
+            <label>Category Name</label>
+
+            <input
+                type="text"
+                id="new-category-name"
+                placeholder="Contoh: Dining Chair"
+            >
+
+        </div>
+
 
         <button
             type="button"
-            class="remove-item"
-            onclick="removeItem(this)">
-            X
+            class="btn btn-success"
+            onclick="saveCategory()"
+        >
+            Save Category
         </button>
-    `;
 
-    container.appendChild(div);
 
-    itemIndex++;
-}
+        <button
+            type="button"
+            class="btn btn-secondary"
+            onclick="closeCategoryModal()"
+        >
+            Cancel
+        </button>
 
-function removeItem(button) {
+    </div>
 
-    const items = document.querySelectorAll('.item');
+</div>
 
-    if (items.length > 1) {
-        button.parentElement.remove();
+
+<script>
+
+    let productIndex = 0;
+
+    let activeCategorySelect = null;
+
+
+    const categories = @json($categories);
+
+
+    function addProduct()
+    {
+        const container =
+            document.getElementById('product-container');
+
+
+        let options = `
+            <option value="">-- Select Category --</option>
+        `;
+
+
+        categories.forEach(category => {
+
+            options += `
+                <option value="${category.id}">
+                    ${category.name}
+                </option>
+            `;
+
+        });
+
+
+        const row = document.createElement('tr');
+
+
+        row.innerHTML = `
+
+            <td>
+
+                <input
+                    type="text"
+                    name="items[${productIndex}][product]"
+                    required
+                >
+
+            </td>
+
+
+            <td>
+
+                <div class="category-wrapper">
+
+                    <select
+                        name="items[${productIndex}][category_id]"
+                        class="category-select"
+                    >
+
+                        ${options}
+
+                    </select>
+
+
+                    <button
+                        type="button"
+                        class="btn btn-success"
+                        onclick="openCategoryModal(this)"
+                    >
+                        +
+                    </button>
+
+                </div>
+
+            </td>
+
+
+            <td>
+
+                <input
+                    type="number"
+                    name="items[${productIndex}][qty]"
+                    value="1"
+                    min="1"
+                    required
+                    oninput="calculateTotal()"
+                >
+
+            </td>
+
+
+            <td>
+
+                <input
+                    type="number"
+                    name="items[${productIndex}][price]"
+                    value="0"
+                    min="0"
+                    required
+                    oninput="calculateTotal()"
+                >
+
+            </td>
+
+
+            <td>
+
+                <input
+                    type="text"
+                    name="items[${productIndex}][color]"
+                >
+
+            </td>
+
+
+            <td>
+
+                <select
+                    name="items[${productIndex}][source]"
+                    required
+                >
+
+                    <option value="Stock">
+                        Stock
+                    </option>
+
+                    <option value="Order" selected>
+                        Order
+                    </option>
+
+                    <option value="Mix">
+                        Mix
+                    </option>
+
+                </select>
+
+            </td>
+
+
+            <td>
+
+                <select
+                    name="items[${productIndex}][status]"
+                    required
+                >
+
+                    <option value="None">
+                        None
+                    </option>
+
+                    <option value="Produksi">
+                        Produksi
+                    </option>
+
+                    <option value="Distribusi">
+                        Distribusi
+                    </option>
+
+                    <option value="Ready">
+                        Ready
+                    </option>
+
+                </select>
+
+            </td>
+
+
+            <td>
+
+                <input
+                    type="file"
+                    name="items[${productIndex}][image]"
+                    accept="image/*"
+                >
+
+            </td>
+
+
+            <td>
+
+                <button
+                    type="button"
+                    class="btn btn-danger"
+                    onclick="removeProduct(this)"
+                >
+                    X
+                </button>
+
+            </td>
+
+        `;
+
+
+        container.appendChild(row);
+
+        productIndex++;
+
+        calculateTotal();
     }
 
-}
+
+    function removeProduct(button)
+    {
+        button.closest('tr').remove();
+
+        calculateTotal();
+    }
+
+
+    function calculateTotal()
+    {
+        let total = 0;
+
+
+        document
+            .querySelectorAll('#product-container tr')
+            .forEach(row => {
+
+                const qty =
+                    parseFloat(
+                        row.querySelector('[name*="[qty]"]')?.value
+                    ) || 0;
+
+
+                const price =
+                    parseFloat(
+                        row.querySelector('[name*="[price]"]')?.value
+                    ) || 0;
+
+
+                total += qty * price;
+
+            });
+
+
+        document.getElementById('total-display').innerText =
+            new Intl.NumberFormat('id-ID').format(total);
+    }
+
+
+    function openCategoryModal(button)
+    {
+        activeCategorySelect =
+            button
+                .closest('.category-wrapper')
+                .querySelector('.category-select');
+
+
+        document.getElementById('categoryModal').style.display =
+            'flex';
+
+
+        document.getElementById('new-category-name').value = '';
+
+        document.getElementById('category-error').innerText = '';
+
+
+        document
+            .getElementById('new-category-name')
+            .focus();
+    }
+
+
+    function closeCategoryModal()
+    {
+        document.getElementById('categoryModal').style.display =
+            'none';
+    }
+
+
+    async function saveCategory()
+    {
+        const name =
+            document
+                .getElementById('new-category-name')
+                .value
+                .trim();
+
+
+        const errorBox =
+            document.getElementById('category-error');
+
+
+        if (!name) {
+
+            errorBox.innerText =
+                'Category name wajib diisi.';
+
+            return;
+        }
+
+
+        try {
+
+            const response =
+                await fetch('{{ route('categories.store') }}', {
+
+                    method: 'POST',
+
+                    headers: {
+
+                        'Content-Type':
+                            'application/json',
+
+                        'Accept':
+                            'application/json',
+
+                        'X-CSRF-TOKEN':
+                            '{{ csrf_token() }}'
+
+                    },
+
+                    body: JSON.stringify({
+                        name: name
+                    })
+
+                });
+
+
+            const data =
+                await response.json();
+
+
+            if (!response.ok) {
+
+                if (data.errors?.name) {
+
+                    errorBox.innerText =
+                        data.errors.name[0];
+
+                } else {
+
+                    errorBox.innerText =
+                        'Gagal menambahkan category.';
+
+                }
+
+                return;
+            }
+
+
+            const category =
+                data.category;
+
+
+            // Masukkan category baru
+            // ke semua dropdown category
+
+            document
+                .querySelectorAll('.category-select')
+                .forEach(select => {
+
+                    const option =
+                        document.createElement('option');
+
+                    option.value =
+                        category.id;
+
+                    option.textContent =
+                        category.name;
+
+                    select.appendChild(option);
+
+                });
+
+
+            // Pilih category baru
+            // pada product yang sedang aktif
+
+            if (activeCategorySelect) {
+
+                activeCategorySelect.value =
+                    category.id;
+
+            }
+
+
+            // Update array JS
+            categories.push(category);
+
+
+            closeCategoryModal();
+
+
+        } catch (error) {
+
+            console.error(error);
+
+            errorBox.innerText =
+                'Terjadi kesalahan server.';
+
+        }
+    }
+
+
+    // Otomatis buat satu product
+    // ketika halaman dibuka
+
+    document.addEventListener('DOMContentLoaded', function () {
+
+        addProduct();
+
+    });
 
 </script>
 

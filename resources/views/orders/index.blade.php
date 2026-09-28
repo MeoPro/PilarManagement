@@ -1,82 +1,54 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Orders - Pilar Management</title>
+<head>
+
+    <meta charset="UTF-8">
+
+    <title>Orders</title>
 
     <style>
+
         body {
-            font-family: Arial, sans-serif;
-            background: #f5f6f8;
-            margin: 0;
-            padding: 30px;
-        }
-
-        .container {
-            max-width: 1500px;
-            margin: auto;
-        }
-
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 25px;
-        }
-
-        h1 {
-            margin: 0;
-        }
-
-        .btn {
-            padding: 10px 16px;
-            border-radius: 6px;
-            text-decoration: none;
-            border: none;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        .btn-primary {
-            background: #222;
-            color: white;
-        }
-
-        .btn-warning {
-            background: #f0ad4e;
-            color: white;
-        }
-
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-
-        .btn-info {
-            background: #0d6efd;
-            color: white;
+            font-family: Arial;
+            margin: 30px;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
-            background: white;
-            border-radius: 10px;
-            overflow: hidden;
         }
 
         th,
         td {
-            padding: 14px;
-            border-bottom: 1px solid #eee;
-            text-align: left;
-            vertical-align: middle;
+            border: 1px solid #ddd;
+            padding: 10px;
         }
 
         th {
+            background: #f5f5f5;
+        }
+
+        .btn {
+            padding: 7px 12px;
+            border-radius: 5px;
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+        }
+
+        .primary {
             background: #222;
+            color: white;
+        }
+
+        .warning {
+            background: #ffc107;
+            color: black;
+        }
+
+        .danger {
+            background: #dc3545;
             color: white;
         }
 
@@ -84,204 +56,223 @@
             background: #dc3545;
             color: white;
             padding: 5px 8px;
-            border-radius: 5px;
-            font-size: 12px;
+            border-radius: 4px;
         }
 
-        .normal {
-            background: #e9ecef;
-            padding: 5px 8px;
-            border-radius: 5px;
-            font-size: 12px;
-        }
-
-        .status {
-            padding: 5px 9px;
-            border-radius: 5px;
-            background: #eee;
-            font-size: 12px;
-        }
-
-        .actions {
-            display: flex;
-            gap: 5px;
-        }
-
-        .success {
-            background: #d1e7dd;
-            color: #0f5132;
-            padding: 12px;
-            margin-bottom: 20px;
-            border-radius: 6px;
-        }
-
-        .pagination {
-            margin-top: 20px;
-        }
     </style>
+
 </head>
 
 <body>
 
-<div class="container">
+<h1>Orders</h1>
 
-    <div class="header">
-        <h1>Orders</h1>
 
-        <a href="{{ route('orders.create') }}"
-           class="btn btn-primary">
-            + Add Order
-        </a>
+@if(session('success'))
+
+    <div style="color:green;margin-bottom:20px;">
+        {{ session('success') }}
     </div>
 
-    @if(session('success'))
-        <div class="success">
-            {{ session('success') }}
-        </div>
-    @endif
+@endif
 
-    <table>
 
-        <thead>
+<a
+    href="{{ route('orders.create') }}"
+    class="btn primary"
+>
+    + Create Order
+</a>
+
+
+<a
+    href="{{ route('categories.index') }}"
+    class="btn"
+>
+    Categories
+</a>
+
+
+<br><br>
+
+
+<table>
+
+    <thead>
+
         <tr>
+
             <th>Order ID</th>
+
             <th>Tamu</th>
-            <th>No. Telp</th>
-            <th>Barang</th>
-            <th>Warna</th>
-            <th>Tgl. Gambar</th>
+
+            <th>No. Telpon</th>
+
+            <th>Products</th>
+
+            <th>Total</th>
+
             <th>Deadline</th>
-            <th>Urgent</th>
+
+            <th>Last Edit</th>
+
             <th>Status</th>
+
             <th>Action</th>
+
         </tr>
-        </thead>
 
-        <tbody>
+    </thead>
 
-        @forelse($orders as $order)
 
-            <tr>
+    <tbody>
 
-                <td>
-                    <strong>{{ $order->order_id }}</strong>
-                </td>
+    @forelse($orders as $order)
 
-                <td>
-                    {{ $order->guest_name }}
-                </td>
+        <tr>
 
-                <td>
-                    {{ $order->phone }}
-                </td>
+            <td>
+                {{ $order->order_id }}
+            </td>
 
-                <td>
 
-                    @if($order->items)
+            <td>
+                {{ $order->guest_name }}
+            </td>
 
-                        @foreach($order->items as $item)
 
-                            <div>
-                                {{ $item['name'] }}
-                                × {{ $item['quantity'] }}
-                            </div>
+            <td>
+                {{ $order->phone }}
+            </td>
 
-                        @endforeach
 
-                    @else
-                        -
-                    @endif
+            <td>
 
-                </td>
+                @foreach($order->items as $item)
 
-                <td>
-                    {{ $order->color ?? '-' }}
-                </td>
+                    <div style="margin-bottom:5px;">
 
-                <td>
-                    {{ $order->image_date?->format('d M Y') ?? '-' }}
-                </td>
+                        <strong>
+                            {{ $item->product }}
+                        </strong>
 
-                <td>
-                    {{ $order->deadline?->format('d M Y') ?? '-' }}
-                </td>
+                        × {{ $item->qty }}
 
-                <td>
+                        @if($item->category)
 
-                    @if($order->urgent)
+                            <small>
+                                ({{ $item->category->name }})
+                            </small>
 
-                        <span class="urgent">
-                            URGENT
-                        </span>
-
-                    @else
-
-                        <span class="normal">
-                            Normal
-                        </span>
-
-                    @endif
-
-                </td>
-
-                <td>
-                    <span class="status">
-                        {{ $order->status }}
-                    </span>
-                </td>
-
-                <td>
-
-                    <div class="actions">
-
-                        <a href="{{ route('orders.show', $order) }}"
-                           class="btn btn-info">
-                            View
-                        </a>
-
-                        <a href="{{ route('orders.edit', $order) }}"
-                           class="btn btn-warning">
-                            Edit
-                        </a>
-
-                        <form action="{{ route('orders.destroy', $order) }}"
-                              method="POST"
-                              onsubmit="return confirm('Hapus order ini?')">
-
-                            @csrf
-                            @method('DELETE')
-
-                            <button class="btn btn-danger">
-                                Delete
-                            </button>
-
-                        </form>
+                        @endif
 
                     </div>
 
-                </td>
+                @endforeach
 
-            </tr>
+            </td>
 
-        @empty
 
-            <tr>
-                <td colspan="10" style="text-align:center;">
-                    Belum ada order.
-                </td>
-            </tr>
+            <td>
 
-        @endforelse
+                Rp {{ number_format($order->total_order, 0, ',', '.') }}
 
-        </tbody>
+            </td>
 
-    </table>
 
-    <div class="pagination">
-        {{ $orders->links() }}
-    </div>
+            <td>
 
-</div>
+                {{ $order->deadline?->format('d/m/Y') ?? '-' }}
+
+            </td>
+
+
+            <td>
+
+                {{ $order->last_edit?->format('d/m/Y H:i') ?? '-' }}
+
+            </td>
+
+
+            <td>
+
+                @if($order->is_urgent)
+
+                    <span class="urgent">
+                        URGENT
+                    </span>
+
+                @else
+
+                    {{ $order->status }}
+
+                @endif
+
+            </td>
+
+
+            <td>
+
+                <a
+                    href="{{ route('orders.show', $order) }}"
+                    class="btn"
+                >
+                    View
+                </a>
+
+
+                <a
+                    href="{{ route('orders.edit', $order) }}"
+                    class="btn warning"
+                >
+                    Edit
+                </a>
+
+
+                <form
+                    action="{{ route('orders.destroy', $order) }}"
+                    method="POST"
+                    style="display:inline;"
+                >
+
+                    @csrf
+                    @method('DELETE')
+
+                    <button
+                        type="submit"
+                        class="btn danger"
+                        onclick="return confirm('Hapus order ini?')"
+                    >
+                        Delete
+                    </button>
+
+                </form>
+
+            </td>
+
+        </tr>
+
+    @empty
+
+        <tr>
+
+            <td colspan="9">
+                Belum ada order.
+            </td>
+
+        </tr>
+
+    @endforelse
+
+    </tbody>
+
+</table>
+
+
+<br>
+
+{{ $orders->links() }}
 
 </body>
+
 </html>

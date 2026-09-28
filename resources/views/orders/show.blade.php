@@ -5,80 +5,33 @@
 
     <meta charset="UTF-8">
 
-    <title>{{ $order->order_id }}</title>
+    <title>
+        Order {{ $order->order_id }}
+    </title>
 
     <style>
 
         body {
-            font-family: Arial, sans-serif;
-            background: #f5f6f8;
-            padding: 30px;
+            font-family: Arial;
+            margin: 30px;
         }
 
-        .container {
-            max-width: 900px;
-            margin: auto;
+        table {
+            width: 100%;
+            border-collapse: collapse;
         }
 
-        .card {
-            background: white;
-            padding: 25px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-
-        .row {
-            display: grid;
-            grid-template-columns: 200px 1fr;
-            padding: 12px 0;
-            border-bottom: 1px solid #eee;
-        }
-
-        .label {
-            font-weight: bold;
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 10px;
         }
 
         .urgent {
-            display: inline-block;
-            background: #dc3545;
+            background: red;
             color: white;
-            padding: 6px 10px;
+            padding: 5px 10px;
             border-radius: 5px;
-        }
-
-        .normal {
-            display: inline-block;
-            background: #e9ecef;
-            padding: 6px 10px;
-            border-radius: 5px;
-        }
-
-        .order-image {
-            max-width: 500px;
-            width: 100%;
-            border-radius: 8px;
-            margin-top: 10px;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 10px 15px;
-            border-radius: 6px;
-            text-decoration: none;
-            color: white;
-            margin-right: 5px;
-        }
-
-        .btn-back {
-            background: #6c757d;
-        }
-
-        .btn-edit {
-            background: #f0ad4e;
-        }
-
-        li {
-            margin-bottom: 8px;
         }
 
     </style>
@@ -87,92 +40,126 @@
 
 <body>
 
-<div class="container">
+<h1>
+    Order {{ $order->order_id }}
+</h1>
 
-    <div class="card">
 
-        <h1>
-            Order {{ $order->order_id }}
-        </h1>
+<p>
+    <strong>Tamu:</strong>
+    {{ $order->guest_name }}
+</p>
 
-        <a
-            href="{{ route('orders.index') }}"
-            class="btn btn-back">
 
-            ← Back
+<p>
+    <strong>No. Telpon:</strong>
+    {{ $order->phone ?? '-' }}
+</p>
 
-        </a>
 
-        <a
-            href="{{ route('orders.edit', $order) }}"
-            class="btn btn-edit">
+<p>
+    <strong>Deadline:</strong>
+    {{ $order->deadline?->format('d M Y') ?? '-' }}
+</p>
 
-            Edit
 
-        </a>
+<p>
+    <strong>Last Edit:</strong>
+    {{ $order->last_edit?->format('d M Y H:i') ?? '-' }}
+</p>
 
-    </div>
 
-    <div class="card">
+<p>
 
-        <div class="row">
+    <strong>Status:</strong>
 
-            <div class="label">
-                Order ID
-            </div>
+    @if($order->is_urgent)
 
-            <div>
-                {{ $order->order_id }}
-            </div>
+        <span class="urgent">
+            URGENT
+        </span>
 
-        </div>
+    @else
 
-        <div class="row">
+        {{ $order->status }}
 
-            <div class="label">
-                Tamu
-            </div>
+    @endif
 
-            <div>
-                {{ $order->guest_name }}
-            </div>
+</p>
 
-        </div>
 
-        <div class="row">
+<h2>List Produk</h2>
 
-            <div class="label">
-                No. Telpon
-            </div>
 
-            <div>
-                {{ $order->phone }}
-            </div>
+<table>
 
-        </div>
+    <thead>
 
-        <div class="row">
+        <tr>
 
-            <div class="label">
-                List Barang
-            </div>
+            <th>Produk</th>
+            <th>Category</th>
+            <th>Qty</th>
+            <th>Harga</th>
+            <th>Subtotal</th>
+            <th>Warna</th>
+            <th>Sumber</th>
+            <th>Status</th>
+            <th>Gambar</th>
 
-            <div>
+        </tr>
 
-                @if($order->items)
+    </thead>
 
-                    <ul>
 
-                        @foreach($order->items as $item)
+    <tbody>
 
-                            <li>
-                                {{ $item['name'] }}
-                                — {{ $item['quantity'] }} pcs
-                            </li>
+    @foreach($order->items as $item)
 
-                        @endforeach
+        <tr>
 
-                    </ul>
+            <td>
+                {{ $item->product }}
+            </td>
+
+            <td>
+                {{ $item->category?->name ?? '-' }}
+            </td>
+
+            <td>
+                {{ $item->qty }}
+            </td>
+
+            <td>
+                Rp {{ number_format($item->price, 0, ',', '.') }}
+            </td>
+
+            <td>
+                Rp {{ number_format($item->subtotal, 0, ',', '.') }}
+            </td>
+
+            <td>
+                {{ $item->color ?? '-' }}
+            </td>
+
+            <td>
+                {{ $item->source }}
+            </td>
+
+            <td>
+                {{ $item->status }}
+            </td>
+
+            <td>
+
+                @if($item->image)
+
+                    <a
+                        href="{{ asset('storage/' . $item->image) }}"
+                        target="_blank"
+                    >
+                        View Image
+                    </a>
 
                 @else
 
@@ -180,116 +167,49 @@
 
                 @endif
 
-            </div>
+            </td>
 
-        </div>
+        </tr>
 
-        <div class="row">
+    @endforeach
 
-            <div class="label">
-                Warna
-            </div>
+    </tbody>
 
-            <div>
-                {{ $order->color ?? '-' }}
-            </div>
+</table>
 
-        </div>
 
-        <div class="row">
+<h2 style="text-align:right;">
 
-            <div class="label">
-                Tanggal Gambar
-            </div>
+    Total:
 
-            <div>
-                {{ $order->image_date?->format('d F Y') ?? '-' }}
-            </div>
+    Rp {{ number_format($order->total_order, 0, ',', '.') }}
 
-        </div>
+</h2>
 
-        <div class="row">
 
-            <div class="label">
-                Deadline
-            </div>
+@if($order->note)
 
-            <div>
-                {{ $order->deadline?->format('d F Y') ?? '-' }}
-            </div>
+    <h3>Note</h3>
 
-        </div>
+    <p>
+        {{ $order->note }}
+    </p>
 
-        <div class="row">
+@endif
 
-            <div class="label">
-                Urgent
-            </div>
 
-            <div>
+<br>
 
-                @if($order->urgent)
 
-                    <span class="urgent">
-                        URGENT
-                    </span>
+<a href="{{ route('orders.index') }}">
+    ← Back
+</a>
 
-                @else
+&nbsp;
 
-                    <span class="normal">
-                        Normal
-                    </span>
-
-                @endif
-
-            </div>
-
-        </div>
-
-        <div class="row">
-
-            <div class="label">
-                Status
-            </div>
-
-            <div>
-                <strong>{{ $order->status }}</strong>
-            </div>
-
-        </div>
-
-        <div class="row">
-
-            <div class="label">
-                Note
-            </div>
-
-            <div>
-                {!! nl2br(e($order->note ?? '-')) !!}
-            </div>
-
-        </div>
-
-    </div>
-
-    @if($order->image)
-
-        <div class="card">
-
-            <h2>
-                Gambar dari WhatsApp
-            </h2>
-
-            <img
-                src="{{ asset('storage/' . $order->image) }}"
-                class="order-image"
-            >
-
-        </div>
-
-    @endif
-
-</div>
+<a href="{{ route('orders.edit', $order) }}">
+    Edit Order
+</a>
 
 </body>
 
