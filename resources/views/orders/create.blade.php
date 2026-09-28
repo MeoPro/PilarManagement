@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 
 <head>
 
@@ -33,6 +33,39 @@
             padding: 9px;
             width: 100%;
             box-sizing: border-box;
+        }
+
+        .price-input {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .date-input {
+            min-height: 42px;
+            border: 1px solid #cbd5d1;
+            border-radius: 5px;
+            background: #fff;
+            color: #17211d;
+            font: inherit;
+            font-variant-numeric: tabular-nums;
+            accent-color: #176b52;
+            cursor: pointer;
+        }
+
+        .date-input:focus {
+            outline: 2px solid #176b52;
+            outline-offset: 1px;
+            border-color: #176b52;
+        }
+
+        .date-input::-webkit-calendar-picker-indicator {
+            padding: 4px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .date-input::-webkit-calendar-picker-indicator:hover {
+            background: #e8f2ee;
         }
 
         label {
@@ -96,6 +129,16 @@
             gap: 5px;
         }
 
+        .guest-wrapper {
+            display: flex;
+            gap: 5px;
+        }
+
+        .guest-wrapper input {
+            flex: 1;
+            min-width: 0;
+        }
+
         .category-wrapper select {
             flex: 1;
         }
@@ -132,7 +175,6 @@
         <div style="color:red;">
 
             <ul>
-
                 @foreach($errors->all() as $error)
 
                     <li>{{ $error }}</li>
@@ -173,8 +215,16 @@
                         type="text"
                         name="order_id"
                         value="{{ old('order_id') }}"
+                        aria-describedby="order-id-error"
                         required
                     >
+
+                    <div
+                        id="order-id-error"
+                        role="alert"
+                        aria-live="polite"
+                        style="color:red;"
+                    ></div>
 
                 </div>
 
@@ -183,12 +233,48 @@
 
                     <label>Tamu</label>
 
-                    <input
-                        type="text"
-                        name="guest_name"
-                        value="{{ old('guest_name') }}"
-                        required
-                    >
+                    <div class="guest-wrapper">
+                        <input
+                            type="text"
+                            name="guest_picker"
+                            list="guest-options"
+                            value="{{ old('guest_name') }}"
+                            placeholder="Cari atau pilih tamu"
+                            autocomplete="off"
+                            oninput="updateGuestPhone(this)"
+                            required
+                        >
+                        <input type="hidden" name="guest_id" value="{{ old('guest_id') }}">
+                        <input
+                            type="hidden"
+                            name="guest_name"
+                            value="{{ old('guest_name') }}"
+                        >
+                        <button
+                            type="button"
+                            class="btn btn-success"
+                            onclick="openGuestModal(this)"
+                            aria-label="Tambah tamu"
+                        >
+                            +
+                        </button>
+                    </div>
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label>Sumber Tamu</label>
+
+                    <select name="guest_source" required>
+                        <option value="">-- Pilih Sumber Tamu --</option>
+                        @foreach(['Lokal', 'Online', 'Touris'] as $guestSource)
+                            <option value="{{ $guestSource }}" @selected(old('guest_source') === $guestSource)>
+                                {{ $guestSource }}
+                            </option>
+                        @endforeach
+                    </select>
 
                 </div>
 
@@ -200,6 +286,7 @@
                     <input
                         type="text"
                         name="phone"
+                        id="guest-phone"
                         value="{{ old('phone') }}"
                     >
 
@@ -212,6 +299,7 @@
 
                     <input
                         type="date"
+                        class="date-input"
                         name="deadline"
                         value="{{ old('deadline') }}"
                     >
@@ -223,29 +311,8 @@
 
                     <label>Status Order</label>
 
-                    <select name="status">
-
-                        <option value="None">
-                            None
-                        </option>
-
-                        <option value="Proses Produksi">
-                            Proses Produksi
-                        </option>
-
-                        <option value="Finishing">
-                            Finishing
-                        </option>
-
-                        <option value="Selesai">
-                            Selesai
-                        </option>
-
-                        <option value="Cancel">
-                            Cancel
-                        </option>
-
-                    </select>
+                    <input type="hidden" name="status" value="None">
+                    <div>None</div>
 
                 </div>
 
@@ -357,6 +424,25 @@
 </div>
 
 
+<datalist id="guest-options">
+    @foreach($guests as $guest)
+        <option value="{{ $guest->name }}"></option>
+    @endforeach
+</datalist>
+
+<datalist id="category-options">
+    @foreach($categories as $category)
+        <option value="{{ $category->name }}"></option>
+    @endforeach
+</datalist>
+
+<datalist id="color-options">
+    @foreach($colors as $color)
+        <option value="{{ $color }}"></option>
+    @endforeach
+</datalist>
+
+
 {{-- ====================================== --}}
 {{-- MODAL ADD CATEGORY --}}
 {{-- ====================================== --}}
@@ -407,37 +493,151 @@
 </div>
 
 
+<div
+    id="colorModal"
+    class="modal"
+>
+
+    <div class="modal-content">
+
+        <h2>Add New Color</h2>
+
+        <div id="color-error" style="color:red;"></div>
+
+        <div class="form-group">
+
+            <label>Color Name</label>
+
+            <input
+                type="text"
+                id="new-color-name"
+                placeholder="Contoh: Natural"
+            >
+
+        </div>
+
+
+        <button
+            type="button"
+            class="btn btn-success"
+            onclick="saveColor()"
+        >
+            Save Color
+        </button>
+
+
+        <button
+            type="button"
+            class="btn btn-secondary"
+            onclick="closeColorModal()"
+        >
+            Cancel
+        </button>
+
+    </div>
+
+</div>
+
+
+<div
+    id="guestModal"
+    class="modal"
+>
+
+    <div class="modal-content">
+
+        <h2>Add New Guest</h2>
+
+        <div id="guest-error" style="color:red;"></div>
+
+        <div class="form-group">
+            <label>Nama Tamu</label>
+            <input type="text" id="new-guest-name" required>
+        </div>
+
+        <button type="button" class="btn btn-success" onclick="saveGuest()">
+            Save Guest
+        </button>
+
+        <button type="button" class="btn btn-secondary" onclick="closeGuestModal()">
+            Cancel
+        </button>
+
+    </div>
+
+</div>
+
+
 <script>
 
     let productIndex = 0;
 
-    let activeCategorySelect = null;
+    let activeCategoryInput = null;
+    let activeColorInput = null;
+    let activeGuestInput = null;
 
 
     const categories = @json($categories);
+    const guests = @json($guests);
+    const oldItems = @json(is_array(old('items')) ? old('items') : []);
 
 
-    function addProduct()
+    function formatPriceInput(input, trimTrailingZeros = false)
+    {
+        const cursorPosition = input.selectionStart ?? input.value.length;
+        const textBeforeCursor = input.value.slice(0, cursorPosition);
+        const normalizedValue = input.value
+            .replace(/,/g, '')
+            .replace(/[^\d.]/g, '');
+        const decimalPosition = normalizedValue.indexOf('.');
+        const integerPart = decimalPosition === -1
+            ? normalizedValue
+            : normalizedValue.slice(0, decimalPosition);
+        let decimalPart = decimalPosition === -1
+            ? ''
+            : normalizedValue.slice(decimalPosition + 1).replace(/\./g, '').slice(0, 2);
+
+        if (trimTrailingZeros) {
+            decimalPart = decimalPart.replace(/0+$/, '');
+        }
+
+        const hasDecimal = decimalPosition !== -1
+            && (!trimTrailingZeros || decimalPart.length > 0);
+        const formattedInteger = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        const formattedValue = hasDecimal
+            ? `${formattedInteger || '0'}.${decimalPart}`
+            : formattedInteger;
+
+        input.value = formattedValue;
+
+        if (document.activeElement !== input) {
+            return;
+        }
+
+        const digitsBeforeCursor = textBeforeCursor.replace(/\D/g, '').length;
+        let nextCursorPosition = 0;
+        let digitsSeen = 0;
+
+        while (nextCursorPosition < formattedValue.length && digitsSeen < digitsBeforeCursor) {
+            if (/\d/.test(formattedValue[nextCursorPosition])) {
+                digitsSeen++;
+            }
+
+            nextCursorPosition++;
+        }
+
+        if (textBeforeCursor.includes('.') && formattedValue[nextCursorPosition] === '.') {
+            nextCursorPosition++;
+        }
+
+        input.setSelectionRange(nextCursorPosition, nextCursorPosition);
+    }
+
+
+    function addProduct(oldItem = null)
     {
         const container =
             document.getElementById('product-container');
-
-
-        let options = `
-            <option value="">-- Select Category --</option>
-        `;
-
-
-        categories.forEach(category => {
-
-            options += `
-                <option value="${category.id}">
-                    ${category.name}
-                </option>
-            `;
-
-        });
-
 
         const row = document.createElement('tr');
 
@@ -459,14 +659,19 @@
 
                 <div class="category-wrapper">
 
-                    <select
-                        name="items[${productIndex}][category_id]"
-                        class="category-select"
+                    <input
+                        type="text"
+                        class="category-search"
+                        list="category-options"
+                        autocomplete="off"
+                        placeholder="Cari kategori"
+                        oninput="updateCategoryId(this)"
                     >
 
-                        ${options}
-
-                    </select>
+                    <input
+                        type="hidden"
+                        name="items[${productIndex}][category_id]"
+                    >
 
 
                     <button
@@ -499,12 +704,12 @@
             <td>
 
                 <input
-                    type="number"
+                    type="text"
+                    inputmode="decimal"
+                    class="price-input"
                     name="items[${productIndex}][price]"
-                    value="0"
-                    min="0"
                     required
-                    oninput="calculateTotal()"
+                    oninput="formatPriceInput(this); calculateTotal()"
                 >
 
             </td>
@@ -512,10 +717,26 @@
 
             <td>
 
-                <input
-                    type="text"
-                    name="items[${productIndex}][color]"
-                >
+                <div class="category-wrapper">
+
+                    <input
+                        type="text"
+                        name="items[${productIndex}][color]"
+                        class="color-search"
+                        list="color-options"
+                        autocomplete="off"
+                        placeholder="Cari warna"
+                    >
+
+                    <button
+                        type="button"
+                        class="btn btn-success"
+                        onclick="openColorModal(this)"
+                    >
+                        +
+                    </button>
+
+                </div>
 
             </td>
 
@@ -537,6 +758,10 @@
 
                     <option value="Mix">
                         Mix
+                    </option>
+
+                    <option value="Service">
+                        Service
                     </option>
 
                 </select>
@@ -600,6 +825,20 @@
 
         container.appendChild(row);
 
+        if (oldItem) {
+            row.querySelector('[name$="[product]"]').value = oldItem.product ?? '';
+            row.querySelector('[name$="[category_id]"]').value = oldItem.category_id ?? '';
+            const oldCategory = categories.find(category => String(category.id) === String(oldItem.category_id));
+            row.querySelector('.category-search').value = oldCategory?.name ?? '';
+            row.querySelector('[name$="[qty]"]').value = oldItem.qty ?? '';
+            row.querySelector('[name$="[price]"]').value = oldItem.price ?? '';
+            row.querySelector('[name$="[color]"]').value = oldItem.color ?? '';
+            row.querySelector('[name$="[source]"]').value = oldItem.source ?? 'Order';
+            row.querySelector('[name$="[status]"]').value = oldItem.status ?? 'None';
+        }
+
+        formatPriceInput(row.querySelector('[name$="[price]"]'), true);
+
         productIndex++;
 
         calculateTotal();
@@ -631,7 +870,7 @@
 
                 const price =
                     parseFloat(
-                        row.querySelector('[name*="[price]"]')?.value
+                        row.querySelector('[name*="[price]"]')?.value.replace(/,/g, '')
                     ) || 0;
 
 
@@ -645,12 +884,115 @@
     }
 
 
+    function updateCategoryId(input)
+    {
+        const matchingCategory = categories.find(category =>
+            category.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
+        );
+
+        input.closest('.category-wrapper')
+            .querySelector('[name$="[category_id]"]').value = matchingCategory?.id ?? '';
+    }
+
+
+    function updateGuestPhone(input)
+    {
+        const normalizedValue = input.value.trim().toLocaleLowerCase();
+        const matchingGuest = guests.find(guest => guest.name.toLocaleLowerCase() === normalizedValue);
+        const guestWrapper = input.closest('.guest-wrapper');
+
+        guestWrapper.querySelector('[name="guest_id"]').value = matchingGuest?.id ?? '';
+        guestWrapper.querySelector('[name="guest_name"]').value = matchingGuest?.name ?? input.value.trim();
+
+        const phoneInput = input.closest('.row').querySelector('[name="phone"]');
+        if (matchingGuest && !phoneInput.value) {
+            phoneInput.value = matchingGuest.phones?.at(-1)?.phone ?? '';
+        }
+    }
+
+
+    function openGuestModal(button)
+    {
+        activeGuestInput = button.closest('.guest-wrapper').querySelector('[name="guest_picker"]');
+        document.getElementById('guestModal').style.display = 'flex';
+        document.getElementById('new-guest-name').value = '';
+        document.getElementById('guest-error').innerText = '';
+        document.getElementById('new-guest-name').focus();
+    }
+
+
+    function closeGuestModal()
+    {
+        document.getElementById('guestModal').style.display = 'none';
+    }
+
+
+    async function saveGuest()
+    {
+        const name = document.getElementById('new-guest-name').value.trim();
+        const errorBox = document.getElementById('guest-error');
+
+        if (!name) {
+            errorBox.innerText = 'Nama tamu wajib diisi.';
+            return;
+        }
+
+        try {
+            const response = await fetch('{{ route('guests.store') }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}'
+                },
+                body: JSON.stringify({ name: name })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                errorBox.innerText = data.errors?.name?.[0]
+                    ?? data.errors?.phone?.[0]
+                    ?? 'Gagal menambahkan tamu.';
+                return;
+            }
+
+            const guest = data.guest;
+            const exists = guests.some(existingGuest => existingGuest.id === guest.id);
+
+            if (!exists) {
+                guests.push(guest);
+            }
+
+            const optionExists = Array.from(document.getElementById('guest-options').options)
+                .some(option => option.value.toLocaleLowerCase() === guest.name.toLocaleLowerCase());
+
+            if (!optionExists) {
+                const option = document.createElement('option');
+                option.value = guest.name;
+                document.getElementById('guest-options').appendChild(option);
+            }
+
+            if (activeGuestInput) {
+                activeGuestInput.value = guest.name;
+                activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_id"]').value = guest.id;
+                activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_name"]').value = guest.name;
+            }
+
+            closeGuestModal();
+        } catch (error) {
+            console.error(error);
+            errorBox.innerText = 'Terjadi kesalahan server.';
+        }
+    }
+
+
     function openCategoryModal(button)
     {
-        activeCategorySelect =
+        activeCategoryInput =
             button
                 .closest('.category-wrapper')
-                .querySelector('.category-select');
+                .querySelector('.category-search');
 
 
         document.getElementById('categoryModal').style.display =
@@ -672,6 +1014,70 @@
     {
         document.getElementById('categoryModal').style.display =
             'none';
+    }
+
+
+    function openColorModal(button)
+    {
+        activeColorInput = button
+            .closest('.category-wrapper')
+            .querySelector('.color-search');
+
+        document.getElementById('colorModal').style.display = 'flex';
+        document.getElementById('new-color-name').value = '';
+        document.getElementById('color-error').innerText = '';
+        document.getElementById('new-color-name').focus();
+    }
+
+
+    function closeColorModal()
+    {
+        document.getElementById('colorModal').style.display = 'none';
+    }
+
+
+    async function saveColor()
+    {
+        const name = document.getElementById('new-color-name').value.trim();
+        const errorBox = document.getElementById('color-error');
+
+        if (!name) {
+            errorBox.innerText = 'Nama warna wajib diisi.';
+            return;
+        }
+
+        try {
+            const response = await fetch('{{ route('colors.store') }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}'
+                },
+                body: JSON.stringify({ name: name })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                errorBox.innerText = data.errors?.name?.[0]
+                    ?? 'Gagal menambahkan warna.';
+                return;
+            }
+
+            const option = document.createElement('option');
+            option.value = data.color.name;
+            document.getElementById('color-options').appendChild(option);
+
+            if (activeColorInput) {
+                activeColorInput.value = data.color.name;
+            }
+
+            closeColorModal();
+        } catch (error) {
+            console.error(error);
+            errorBox.innerText = 'Terjadi kesalahan server.';
+        }
     }
 
 
@@ -750,40 +1156,16 @@
                 data.category;
 
 
-            // Masukkan category baru
-            // ke semua dropdown category
+            const option = document.createElement('option');
+            option.value = category.name;
+            document.getElementById('category-options').appendChild(option);
 
-            document
-                .querySelectorAll('.category-select')
-                .forEach(select => {
-
-                    const option =
-                        document.createElement('option');
-
-                    option.value =
-                        category.id;
-
-                    option.textContent =
-                        category.name;
-
-                    select.appendChild(option);
-
-                });
-
-
-            // Pilih category baru
-            // pada product yang sedang aktif
-
-            if (activeCategorySelect) {
-
-                activeCategorySelect.value =
-                    category.id;
-
-            }
-
-
-            // Update array JS
             categories.push(category);
+
+            if (activeCategoryInput) {
+                activeCategoryInput.value = category.name;
+                updateCategoryId(activeCategoryInput);
+            }
 
 
             closeCategoryModal();
@@ -803,7 +1185,52 @@
     // Otomatis buat satu product
     // ketika halaman dibuka
 
+    const orderForm = document.querySelector('form');
+    const orderIdInput = orderForm.querySelector('[name="order_id"]');
+    const orderIdError = document.getElementById('order-id-error');
+
+    orderIdInput.addEventListener('input', function () {
+        orderIdError.innerText = '';
+    });
+
+    orderForm.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        orderIdError.innerText = '';
+
+        try {
+            const response = await fetch(
+                `{{ route('orders.check-id') }}?order_id=${encodeURIComponent(orderIdInput.value.trim())}`,
+                { headers: { Accept: 'application/json' } }
+            );
+            const data = await response.json();
+
+            if (!response.ok || !data.available) {
+                orderIdError.innerText = data.message
+                    ?? data.errors?.order_id?.[0]
+                    ?? 'Gagal memeriksa Order ID.';
+                orderIdInput.focus();
+                return;
+            }
+        } catch (error) {
+            console.error(error);
+            orderIdError.innerText = 'Tidak dapat memeriksa Order ID. Coba lagi.';
+            return;
+        }
+
+        this.querySelectorAll('[name*="[price]"]').forEach(input => {
+            input.value = input.value.replace(/,/g, '');
+        });
+
+        HTMLFormElement.prototype.submit.call(this);
+    });
+
+
     document.addEventListener('DOMContentLoaded', function () {
+
+        if (oldItems.length > 0) {
+            oldItems.forEach(oldItem => addProduct(oldItem));
+            return;
+        }
 
         addProduct();
 

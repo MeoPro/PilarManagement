@@ -59,6 +59,32 @@
             border-radius: 4px;
         }
 
+        .search-form {
+            display: flex;
+            gap: 8px;
+            max-width: 920px;
+            margin: 24px 0;
+            align-items: center;
+        }
+
+        .search-form input,
+        .search-form select {
+            flex: 1;
+            min-width: 0;
+            padding: 9px 11px;
+        }
+
+        .deadline-remaining {
+            display: block;
+            margin-top: 4px;
+            color: #555;
+            font-size: 12px;
+        }
+
+        .deadline-overdue {
+            color: #b42318;
+        }
+
     </style>
 
 </head>
@@ -92,8 +118,40 @@
     Categories
 </a>
 
+<a
+    href="{{ route('guests.index') }}"
+    class="btn"
+>
+    Daftar Tamu
+</a>
+
 
 <br><br>
+
+
+<form action="{{ route('orders.index') }}" method="GET" class="search-form">
+    <input
+        type="search"
+        name="search"
+        value="{{ $search }}"
+        placeholder="Cari ID, nama tamu, telepon, atau produk"
+        aria-label="Cari order"
+    >
+
+    <select name="sort" aria-label="Urutkan order">
+        @foreach($sortOptions as $value => $label)
+            <option value="{{ $value }}" @selected($sort === $value)>
+                {{ $label }}
+            </option>
+        @endforeach
+    </select>
+
+    <button type="submit" class="btn primary">Search</button>
+
+    @if($search !== '')
+        <a href="{{ route('orders.index') }}" class="btn">Reset</a>
+    @endif
+</form>
 
 
 <table>
@@ -105,6 +163,8 @@
             <th>Order ID</th>
 
             <th>Tamu</th>
+
+            <th>Sumber Tamu</th>
 
             <th>No. Telpon</th>
 
@@ -138,6 +198,11 @@
 
             <td>
                 {{ $order->guest_name }}
+            </td>
+
+
+            <td>
+                {{ $order->guest_source ?? '-' }}
             </td>
 
 
@@ -183,6 +248,13 @@
             <td>
 
                 {{ $order->deadline?->format('d/m/Y') ?? '-' }}
+
+                @if($order->deadline && $order->status !== 'Selesai')
+                    @php($daysRemaining = (int) today()->diffInDays($order->deadline->copy()->startOfDay(), false))
+                    @php($deadlineLabel = $daysRemaining > 0 ? $daysRemaining.' hari'.($daysRemaining >= 7 ? ' / '.intdiv($daysRemaining, 7).' minggu' : '').' tersisa' : ($daysRemaining === 0 ? 'Deadline hari ini' : 'Terlambat '.abs($daysRemaining).' hari'))
+
+                    <small class="deadline-remaining {{ $daysRemaining < 0 ? 'deadline-overdue' : '' }}">{{ $deadlineLabel }}</small>
+                @endif
 
             </td>
 

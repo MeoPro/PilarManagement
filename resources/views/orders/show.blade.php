@@ -52,6 +52,12 @@
 
 
 <p>
+    <strong>Sumber Tamu:</strong>
+    {{ $order->guest_source ?? '-' }}
+</p>
+
+
+<p>
     <strong>No. Telpon:</strong>
     {{ $order->phone ?? '-' }}
 </p>

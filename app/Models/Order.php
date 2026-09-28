@@ -3,13 +3,16 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Order extends Model
 {
     protected $fillable = [
         'order_id',
+        'guest_id',
         'guest_name',
+        'guest_source',
         'phone',
         'total_order',
         'deadline',
@@ -29,14 +32,19 @@ class Order extends Model
         return $this->hasMany(OrderItem::class);
     }
 
+    public function guest(): BelongsTo
+    {
+        return $this->belongsTo(Guest::class);
+    }
+
     public function getIsUrgentAttribute(): bool
     {
-        if (!$this->last_edit) {
+        if (! $this->last_edit) {
             return false;
         }
 
         return $this->last_edit->diffInDays(now()) >= 7
-            && !in_array($this->status, ['Selesai', 'Cancel']);
+            && ! in_array($this->status, ['Selesai', 'Cancel']);
     }
 
     public function getDisplayStatusAttribute(): string

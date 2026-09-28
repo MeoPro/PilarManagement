@@ -3,33 +3,96 @@
 namespace App\Http\Controllers;
 
 use App\Models\Category;
+use App\Models\Color;
+use App\Models\Guest;
+use App\Models\GuestPhone;
 use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $orders = Order::with('items.category')
-            ->latest()
-            ->paginate(10);
+        $search = trim((string) $request->query('search', ''));
+        $sortOptions = [
+            'oldest' => 'Order terlama',
+            'most' => 'Produk terbanyak',
+            'remaining_more' => 'Waktu tersisa paling banyak',
+            'remaining_less' => 'Waktu tersisa paling sedikit',
+        ];
+        $sort = $request->query('sort', 'remaining_less');
 
-        return view('orders.index', compact('orders'));
+        if (! array_key_exists($sort, $sortOptions)) {
+            $sort = 'remaining_less';
+        }
+
+        $orders = Order::with('items.category')
+            ->withSum('items', 'qty')
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($query) use ($search) {
+                    $query->where('order_id', 'like', "%{$search}%")
+                        ->orWhere('guest_name', 'like', "%{$search}%")
+                        ->orWhere('phone', 'like', "%{$search}%")
+                        ->orWhereHas('items', function ($query) use ($search) {
+                            $query->where('product', 'like', "%{$search}%")
+                                ->orWhereHas('category', function ($query) use ($search) {
+                                    $query->where('name', 'like', "%{$search}%");
+                                });
+                        });
+                });
+            })
+            ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', ['Selesai']);
+
+        match ($sort) {
+            'oldest' => $orders->oldest('created_at')->oldest('id'),
+            'most' => $orders->orderByDesc('items_sum_qty')
+                ->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('deadline')
+                ->oldest('created_at'),
+            'remaining_more' => $orders->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
+                ->orderByDesc('deadline')
+                ->oldest('created_at'),
+            default => $orders->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
+                ->orderBy('deadline')
+                ->oldest('created_at'),
+        };
+
+        $orders = $orders->oldest('id')->paginate(10)->withQueryString();
+
+        return view('orders.index', compact('orders', 'search', 'sort', 'sortOptions'));
     }
 
     public function create()
     {
         $categories = Category::orderBy('name')->get();
+        $colors = Color::orderBy('name')->pluck('name');
+        $guests = $this->guestOptions();
 
-        return view('orders.create', compact('categories'));
+        return view('orders.create', compact('categories', 'colors', 'guests'));
+    }
+
+    public function checkOrderId(Request $request)
+    {
+        $validated = $request->validate([
+            'order_id' => 'required|string|max:255',
+        ]);
+
+        $isAvailable = ! Order::where('order_id', $validated['order_id'])->exists();
+
+        return response()->json([
+            'available' => $isAvailable,
+            'message' => $isAvailable ? null : 'Order ID sudah digunakan.',
+        ]);
     }
 
     public function store(Request $request)
     {
         $validated = $this->validateOrder($request);
+        $validated['guest_name'] = Guest::findOrFail($validated['guest_id'])->name;
 
         DB::transaction(function () use ($request, $validated) {
 
@@ -37,14 +100,18 @@ class OrderController extends Controller
 
             $order = Order::create([
                 'order_id' => $validated['order_id'],
+                'guest_id' => $validated['guest_id'],
                 'guest_name' => $validated['guest_name'],
+                'guest_source' => $validated['guest_source'],
                 'phone' => $validated['phone'] ?? null,
                 'total_order' => 0,
                 'deadline' => $validated['deadline'] ?? null,
                 'last_edit' => now(),
-                'status' => $validated['status'],
+                'status' => 'None',
                 'note' => $validated['note'] ?? null,
             ]);
+
+            $this->rememberGuestPhone($validated['guest_id'], $validated['phone'] ?? null);
 
             foreach ($request->items as $index => $item) {
 
@@ -94,13 +161,18 @@ class OrderController extends Controller
         $order->load('items.category');
 
         $categories = Category::orderBy('name')->get();
+        $colors = Color::orderBy('name')->pluck('name');
+        $existingColors = $order->items->pluck('color')->filter()->unique();
+        $colors = $colors->merge($existingColors)->unique()->sort()->values();
+        $guests = $this->guestOptions();
 
-        return view('orders.edit', compact('order', 'categories'));
+        return view('orders.edit', compact('order', 'categories', 'colors', 'guests'));
     }
 
     public function update(Request $request, Order $order)
     {
-        $validated = $this->validateOrder($request);
+        $validated = $this->validateOrder($request, $order);
+        $validated['guest_name'] = Guest::findOrFail($validated['guest_id'])->name;
 
         if (
             $validated['status'] === 'Finishing'
@@ -111,19 +183,32 @@ class OrderController extends Controller
             ]);
         }
 
+        if (
+            $validated['status'] === 'Selesai'
+            && collect($validated['items'])->contains(fn (array $item): bool => $item['status'] !== 'Ready')
+        ) {
+            throw ValidationException::withMessages([
+                'status' => 'Order tidak bisa diselesaikan karena semua produk harus berstatus Ready.',
+            ]);
+        }
+
         DB::transaction(function () use ($request, $validated, $order) {
 
             $total = 0;
 
             $order->update([
                 'order_id' => $validated['order_id'],
+                'guest_id' => $validated['guest_id'],
                 'guest_name' => $validated['guest_name'],
+                'guest_source' => $validated['guest_source'],
                 'phone' => $validated['phone'] ?? null,
                 'deadline' => $validated['deadline'] ?? null,
                 'last_edit' => now(),
                 'status' => $validated['status'],
                 'note' => $validated['note'] ?? null,
             ]);
+
+            $this->rememberGuestPhone($validated['guest_id'], $validated['phone'] ?? null);
 
             $existingItemIds = [];
 
@@ -229,11 +314,18 @@ class OrderController extends Controller
             ->with('success', 'Order berhasil dihapus.');
     }
 
-    private function validateOrder(Request $request): array
+    private function validateOrder(Request $request, ?Order $order = null): array
     {
         $validated = $request->validate([
-            'order_id' => 'required|string|max:255',
+            'order_id' => [
+                'required',
+                'string',
+                'max:255',
+                Rule::unique('orders', 'order_id')->ignore($order),
+            ],
+            'guest_id' => 'required|integer|exists:guests,id',
             'guest_name' => 'required|string|max:255',
+            'guest_source' => 'required|in:Lokal,Online,Touris',
             'phone' => 'nullable|string|max:50',
 
             'deadline' => 'nullable|date',
@@ -265,7 +357,7 @@ class OrderController extends Controller
 
             'items.*.source' => [
                 'required',
-                'in:Stock,Order,Mix',
+                'in:Stock,Order,Mix,Service',
             ],
 
             'items.*.status' => [
@@ -278,8 +370,31 @@ class OrderController extends Controller
                 'image',
                 'max:5120',
             ],
+        ], [
+            'order_id.unique' => 'Order ID sudah digunakan.',
         ]);
 
         return $validated;
+    }
+
+    private function guestOptions()
+    {
+        return Guest::with('phones')
+            ->orderByRaw('LOWER(name)')
+            ->get(['id', 'name']);
+    }
+
+    private function rememberGuestPhone(int $guestId, ?string $phone): void
+    {
+        $phone = trim((string) $phone);
+
+        if ($phone === '') {
+            return;
+        }
+
+        GuestPhone::firstOrCreate([
+            'guest_id' => $guestId,
+            'phone' => $phone,
+        ]);
     }
 }
