@@ -11,6 +11,13 @@
         </div>
     </div>
 
+    @if(session('success'))
+        <p class="message" role="status">{{ session('success') }}</p>
+    @endif
+    @if(session('error'))
+        <p class="error" role="alert">{{ session('error') }}</p>
+    @endif
+
     <div class="actions">
         @if(auth()->user()->canAccessMenu('orders'))
             <a href="{{ route('orders.index') }}" class="btn">Kembali ke Order</a>
@@ -110,6 +117,15 @@
                                 <a href="{{ route('guests.edit', $guest) }}" class="icon-button" aria-label="Edit tamu" title="Edit tamu">
                                     <x-layout.icon name="pencil" />
                                 </a>
+                                @if(!$guest->hasActiveOrders())
+                                    <form action="{{ route('guests.destroy', $guest) }}" method="POST" onsubmit="return confirm('Hapus data tamu ini? Riwayat order akan tetap tersimpan.')">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button type="submit" class="icon-button delete-button" aria-label="Hapus tamu {{ $guest->name }}" title="Hapus tamu">
+                                            <x-layout.icon name="trash" />
+                                        </button>
+                                    </form>
+                                @endif
                             </div>
                         </td>
                     </tr>

@@ -17,11 +17,14 @@ class Product extends Model
 
     protected $fillable = [
         'name',
+        'sku',
         'category_id',
         'price',
         'dimensions',
         'colors',
         'image',
+        'mockup',
+        'mockups',
     ];
 
     protected function casts(): array
@@ -30,7 +33,19 @@ class Product extends Model
             'category_id' => 'integer',
             'price' => 'decimal:2',
             'colors' => 'array',
+            'mockups' => 'array',
         ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function mockupPaths(): array
+    {
+        return array_values(array_unique(array_filter([
+            ...($this->mockups ?? []),
+            $this->mockup,
+        ], 'is_string')));
     }
 
     public function category(): BelongsTo

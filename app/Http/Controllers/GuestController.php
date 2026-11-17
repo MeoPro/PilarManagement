@@ -49,7 +49,7 @@ class GuestController extends Controller
 
         $guests = Guest::query()
             ->with(['phones', 'orders' => function ($query) {
-                $query->select(['id', 'guest_id', 'order_id', 'phone']);
+                $query->select(['id', 'guest_id', 'order_id', 'phone', 'status']);
             }])
             ->addSelect([
                 'debt_amount' => Order::query()
@@ -109,8 +109,9 @@ class GuestController extends Controller
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate(15);
+        $canDeleteGuest = ! $guest->hasActiveOrders();
 
-        return view('guests.show', compact('guest', 'orders'));
+        return view('guests.show', compact('guest', 'orders', 'canDeleteGuest'));
     }
 
     public function edit(Guest $guest): View
@@ -154,5 +155,30 @@ class GuestController extends Controller
         return redirect()
             ->route('guests.show', $guest)
             ->with('success', 'Data tamu berhasil diperbarui.');
+    }
+
+    public function destroy(Guest $guest): RedirectResponse
+    {
+        $deleted = DB::transaction(function () use ($guest): bool {
+            $lockedGuest = Guest::query()
+                ->lockForUpdate()
+                ->findOrFail($guest->id);
+
+            if ($lockedGuest->activeOrders()->lockForUpdate()->exists()) {
+                return false;
+            }
+
+            $lockedGuest->delete();
+
+            return true;
+        });
+
+        if (! $deleted) {
+            return back()->with('error', 'Tamu tidak dapat dihapus karena masih memiliki order yang sedang berjalan.');
+        }
+
+        return redirect()
+            ->route('guests.index')
+            ->with('success', 'Data tamu berhasil dihapus.');
     }
 }

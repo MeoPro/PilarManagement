@@ -18,7 +18,8 @@ test('pengunjung harus login sebelum mengakses menu admin', function () {
     $response->assertRedirect(route('login'));
     $loginPage->assertSee('Login Admin')
         ->assertSee('name="email"', false)
-        ->assertSee('name="password"', false);
+        ->assertSee('name="password"', false)
+        ->assertSee('<input id="remember" type="checkbox" name="remember" value="1" checked>', false);
 
     $employee = Employee::create([
         'full_name' => 'Private Photo',
@@ -35,14 +36,19 @@ test('admin dapat login dan logout', function () {
     $admin = User::factory()->admin()->create([
         'email' => 'admin@example.com',
         'password' => 'secret-password',
+        'remember_token' => null,
     ]);
 
     $loginResponse = $this->post(route('login.store'), [
         'email' => $admin->email,
         'password' => 'secret-password',
+        'remember' => '1',
     ]);
 
     $loginResponse->assertRedirect(route('admin.index'));
+    $loginResponse->assertCookieNotExpired(auth()->guard()->getRecallerName());
+    expect($admin->fresh()->remember_token)->not->toBeNull();
+    $rememberToken = $admin->fresh()->remember_token;
     $this->assertAuthenticatedAs($admin);
     $this->get(route('admin.index'))
         ->assertSee('Karyawan', false);
@@ -51,6 +57,25 @@ test('admin dapat login dan logout', function () {
 
     $logoutResponse->assertRedirect(route('login'));
     $this->assertGuest();
+    expect($admin->fresh()->remember_token)->not->toBe($rememberToken);
+});
+
+test('admin can opt out of staying signed in on a shared device', function () {
+    $admin = User::factory()->admin()->create([
+        'email' => 'admin@example.com',
+        'password' => 'secret-password',
+        'remember_token' => null,
+    ]);
+
+    $loginResponse = $this->post(route('login.store'), [
+        'email' => $admin->email,
+        'password' => 'secret-password',
+    ]);
+
+    $loginResponse->assertRedirect(route('admin.index'));
+    $loginResponse->assertCookieMissing(auth()->guard()->getRecallerName());
+    expect($admin->fresh()->remember_token)->toBeNull();
+    $this->assertAuthenticatedAs($admin);
 });
 
 test('password yang salah tidak memberikan akses admin', function () {

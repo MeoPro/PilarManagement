@@ -1661,6 +1661,37 @@ textarea {
     margin-bottom: 18px;
 }
 
+.login-remember {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: -2px 0 18px;
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.login-remember input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    margin: 0;
+    accent-color: #4f46e5;
+}
+
+.login-remember label {
+    margin: 0;
+    color: #4b5563;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.login-remember small {
+    margin-left: auto;
+    color: #9ca3af;
+    font-size: 11px;
+    text-align: right;
+}
+
 .login-card .error {
     margin: 0 0 18px;
     border: 1px solid #fecaca;
@@ -3984,6 +4015,62 @@ textarea {
     margin: 0;
 }
 
+.product-selector {
+    position: relative;
+}
+
+.product-selector > input[type="text"] {
+    width: 100%;
+    min-width: 150px;
+}
+
+.product-suggestions {
+    position: fixed;
+    z-index: 1000;
+    max-height: min(260px, calc(100vh - 16px));
+    overflow-y: auto;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 12px 28px rgb(17 24 39 / 18%);
+}
+
+.product-suggestion-option {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    gap: 8px;
+    border: 0;
+    border-radius: 0;
+    background: #fff;
+    padding: 8px 10px;
+    color: #111827;
+    cursor: pointer;
+    text-align: left;
+}
+
+.product-suggestion-option:hover,
+.product-suggestion-option:focus-visible,
+.product-suggestion-option[aria-selected="true"] {
+    background: #eef2ff;
+}
+
+.product-suggestion-name {
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.product-suggestion-color {
+    flex: 0 1 auto;
+    overflow: hidden;
+    color: #6b7280;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .order-form-products-table table {
     min-width: 940px;
     margin-top: 12px;
@@ -4020,6 +4107,28 @@ textarea {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+.order-edit-status-upload {
+    display: block;
+    margin-top: 8px;
+    color: #4b5563;
+    font-size: 11px;
+}
+
+.order-edit-status-upload input {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    margin-top: 4px;
+    font-size: 11px;
+}
+
+.order-edit-status-upload-hint {
+    display: block;
+    margin-top: 8px;
+    color: #6b7280;
+    font-size: 11px;
 }
 
 @media (max-width: 760px) {

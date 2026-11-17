@@ -16,16 +16,43 @@
     </div>
 
     <section class="card compact-form">
-        @if($product->image)
-            <img
-                class="product-catalog-photo product-catalog-photo-large"
-                src="{{ asset('storage/'.$product->image) }}"
-                alt="Foto {{ $product->name }}"
-            >
-        @endif
+        <div>
+            <strong>Foto Produk:</strong>
+            @if($product->image)
+                <p>
+                    <img
+                        class="product-catalog-photo product-catalog-photo-large"
+                        src="{{ asset('storage/'.$product->image) }}"
+                        alt="Foto produk {{ $product->name }}"
+                    >
+                </p>
+            @else
+                <span>Belum ada foto produk</span>
+            @endif
+        </div>
+        <div>
+            <strong>Foto Mockup:</strong>
+            @if($product->mockupPaths() !== [])
+                <div class="order-mockup-gallery">
+                    @foreach($product->mockupPaths() as $mockupPath)
+                    <img
+                        class="product-catalog-photo product-catalog-photo-large"
+                        src="{{ asset('storage/'.$mockupPath) }}"
+                        alt="Mockup {{ $product->name }}"
+                    >
+                    @endforeach
+                </div>
+            @else
+                <span>Belum ada mockup</span>
+            @endif
+        </div>
         <div>
             <strong>Nama:</strong>
             <span>{{ $product->name }}</span>
+        </div>
+        <div>
+            <strong>SKU:</strong>
+            <span>{{ $product->sku ?? '—' }}</span>
         </div>
         <div>
             <strong>Kategori:</strong>

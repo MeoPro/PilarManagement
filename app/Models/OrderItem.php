@@ -14,6 +14,7 @@ class OrderItem extends Model
         'order_id',
         'product',
         'product_id',
+        'sku',
         'dimensions',
         'category_id',
         'subcontractor_id',

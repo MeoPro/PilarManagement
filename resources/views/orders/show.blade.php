@@ -42,7 +42,12 @@
                 <tbody>
                     @foreach($order->items as $item)
                         <tr>
-                            <td>{{ $item->product }}</td>
+                            <td>
+                                {{ $item->product }}
+                                @if($item->sku)
+                                    <small>SKU: {{ $item->sku }}</small>
+                                @endif
+                            </td>
                             <td>{{ $item->category?->name ?? '-' }}</td>
                             <td>{{ $item->dimensions ?? '—' }}</td>
                             <td>

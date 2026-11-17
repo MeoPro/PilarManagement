@@ -153,3 +153,86 @@ test('guest list and profile show the total number of recorded orders', function
     $this->get(route('guests.show', $guest))
         ->assertSee('Jumlah order:</strong> 3 kali', false);
 });
+
+test('active orders prevent deleting a guest and keep the guest record intact', function () {
+    $guest = Guest::create(['name' => 'Guest With Active Order']);
+    $order = Order::create([
+        'order_id' => 'ACTIVE-GUEST-ORDER',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 10000,
+        'status' => 'Proses Produksi',
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->from(route('guests.show', $guest))
+        ->delete(route('guests.destroy', $guest))
+        ->assertRedirect(route('guests.show', $guest))
+        ->assertSessionHas('error', 'Tamu tidak dapat dihapus karena masih memiliki order yang sedang berjalan.');
+
+    $this->assertModelExists($guest);
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'guest_id' => $guest->id,
+        'status' => 'Proses Produksi',
+    ]);
+});
+
+test('guest delete action is hidden while an active order exists', function () {
+    $guest = Guest::create(['name' => 'Guest Delete Visibility']);
+    Order::create([
+        'order_id' => 'GUEST-DELETE-VISIBILITY',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 10000,
+        'status' => 'Finishing',
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->get(route('guests.index'))
+        ->assertDontSee('aria-label="Hapus tamu Guest Delete Visibility"', false);
+
+    $this->get(route('guests.show', $guest))
+        ->assertDontSee('aria-label="Hapus tamu Guest Delete Visibility"', false);
+});
+
+test('guest without active orders can be deleted without removing historical orders', function () {
+    $guest = Guest::create(['name' => 'Guest With Only Finished Orders']);
+    $admin = User::factory()->admin()->create();
+    $completedOrder = Order::create([
+        'order_id' => 'COMPLETED-GUEST-ORDER',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 10000,
+        'status' => 'Selesai',
+    ]);
+    $cancelledOrder = Order::create([
+        'order_id' => 'CANCELLED-GUEST-ORDER',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 5000,
+        'status' => 'Cancel',
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('guests.index'))
+        ->assertSee('aria-label="Hapus tamu Guest With Only Finished Orders"', false);
+
+    $this->get(route('guests.show', $guest))
+        ->assertSee('aria-label="Hapus tamu Guest With Only Finished Orders"', false);
+
+    $this->delete(route('guests.destroy', $guest))
+        ->assertRedirect(route('guests.index'))
+        ->assertSessionHas('success', 'Data tamu berhasil dihapus.');
+
+    $this->assertDatabaseMissing('guests', ['id' => $guest->id]);
+    $this->assertDatabaseHas('orders', [
+        'id' => $completedOrder->id,
+        'guest_id' => null,
+        'guest_name' => 'Guest With Only Finished Orders',
+    ]);
+    $this->assertDatabaseHas('orders', [
+        'id' => $cancelledOrder->id,
+        'guest_id' => null,
+    ]);
+});

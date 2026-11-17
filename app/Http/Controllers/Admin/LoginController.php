@@ -22,7 +22,10 @@ class LoginController extends Controller
             'password' => ['required', 'string'],
         ]);
 
-        if (! Auth::attempt($credentials + ['is_admin' => true, 'is_active' => true])) {
+        if (! Auth::attempt(
+            $credentials + ['is_admin' => true, 'is_active' => true],
+            $request->boolean('remember'),
+        )) {
             return back()
                 ->withErrors(['email' => 'Email atau password tidak cocok.'])
                 ->onlyInput('email');

@@ -159,6 +159,7 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
             Route::get('/guests/{guest}', [GuestController::class, 'show'])->name('guests.show');
             Route::get('/guests/{guest}/edit', [GuestController::class, 'edit'])->name('guests.edit');
             Route::put('/guests/{guest}', [GuestController::class, 'update'])->name('guests.update');
+            Route::delete('/guests/{guest}', [GuestController::class, 'destroy'])->name('guests.destroy');
         });
 
         Route::middleware('menu:categories')->group(function () {

@@ -20,6 +20,7 @@
         <table>
             <thead>
                 <tr>
+                    <th>SKU</th>
                     <th>Foto</th>
                     <th>Produk</th>
                     <th>Kategori</th>
@@ -32,6 +33,7 @@
             <tbody>
                 @forelse($products as $product)
                     <tr>
+                        <td>{{ $product->sku ?? '—' }}</td>
                         <td>
                             @if($product->image)
                                 <img
@@ -44,7 +46,9 @@
                                 <span class="muted">Belum ada foto</span>
                             @endif
                         </td>
-                        <td><a href="{{ route('products.show', $product) }}">{{ $product->name }}</a></td>
+                        <td>
+                            <a href="{{ route('products.show', $product) }}">{{ $product->name }}</a>
+                        </td>
                         <td>{{ $product->category?->name ?? '—' }}</td>
                         <td>{{ $product->dimensions ?? '—' }}</td>
                         <td>{{ implode(', ', $product->colors ?? []) ?: '—' }}</td>
@@ -78,7 +82,7 @@
                     </tr>
                 @empty
                     <tr>
-                        <td colspan="7">Belum ada produk katalog.</td>
+                        <td colspan="8">Belum ada produk katalog.</td>
                     </tr>
                 @endforelse
             </tbody>

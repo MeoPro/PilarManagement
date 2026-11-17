@@ -14,10 +14,20 @@
     @if(session('success'))
         <p class="message" role="status">{{ session('success') }}</p>
     @endif
+    @if(session('error'))
+        <p class="error" role="alert">{{ session('error') }}</p>
+    @endif
 
     <nav class="actions">
         <a class="btn" href="{{ route('guests.index') }}">Kembali ke Daftar Tamu</a>
         <a class="btn" href="{{ route('guests.edit', $guest) }}">Edit Tamu</a>
+        @if($canDeleteGuest)
+            <form action="{{ route('guests.destroy', $guest) }}" method="POST" onsubmit="return confirm('Hapus data tamu ini? Riwayat order akan tetap tersimpan.')">
+                @csrf
+                @method('DELETE')
+                <button type="submit" class="btn delete-button" aria-label="Hapus tamu {{ $guest->name }}">Hapus Tamu</button>
+            </form>
+        @endif
         @if(auth()->user()->canAccessMenu('orders'))
             <a class="btn" href="{{ route('orders.create') }}">+ Buat Order</a>
         @endif

@@ -260,8 +260,12 @@ test('new products added to an order must be saved as New before mockup upload',
     $savedItem = $order->items()->where('product', 'New Chair')->firstOrFail();
     expect($savedItem->status)->toBe('None')
         ->and($savedItem->factory_status)->toBe('None')
+        ->and($savedItem->dimensions)->toBe('10x10x10')
         ->and($savedItem->product_id)->not->toBeNull()
         ->and($savedItem->status_evidence_images)->toBeEmpty();
+
+    $this->get(route('orders.edit', $order))
+        ->assertSee('value="10x10x10"', false);
 
     $this->assertDatabaseHas('products', [
         'id' => $savedItem->product_id,
@@ -361,6 +365,58 @@ test('Factory work queue includes production and packing but excludes Bali-only 
         ->assertSeeText('Bali Transit Product')
         ->assertSeeText('Packed Factory Product')
         ->assertDontSeeText('Active Factory Product');
+});
+
+test('Stock products bypass Factory and enter the PB queue for readiness checks', function () {
+    $salesAdmin = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+
+    $this->actingAs($salesAdmin)
+        ->post(route('orders.store'), [
+            'order_id' => 'STOCK-DIRECT-TO-PB',
+            'guest_name' => 'Stock Guest',
+            'guest_source' => 'Lokal',
+            'order_type' => 'Bali',
+            'status' => 'None',
+            'items' => [[
+                'product' => 'Stock Dining Chair',
+                'dimensions' => '10x10x10',
+                'qty' => 2,
+                'price' => 10000,
+                'source' => 'Stock',
+            ]],
+        ])
+        ->assertRedirect(route('orders.index'));
+
+    $order = Order::query()
+        ->where('order_id', 'STOCK-DIRECT-TO-PB')
+        ->firstOrFail();
+    $item = $order->items()->firstOrFail();
+
+    expect($item->status)->toBe('Distribusi')
+        ->and($item->factory_status)->toBe('None');
+
+    $this->get(route('order-products.index'))
+        ->assertSeeText('Stock Dining Chair');
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('order-products.index'))
+        ->assertDontSeeText('Stock Dining Chair');
+
+    $this->actingAs($salesAdmin)
+        ->patch(route('order-products.update', $item), [
+            'items' => [
+                $item->id => [
+                    'status' => 'Ready',
+                    'qty_completed' => 0,
+                ],
+            ],
+        ])
+        ->assertRedirect();
+
+    expect($item->fresh()->status)->toBe('Ready')
+        ->and($item->fresh()->factory_status)->toBe('Ready')
+        ->and($order->fresh()->status)->toBe('Selesai');
 });
 
 test('orders become urgent when their delivery deadline is within fourteen days', function () {

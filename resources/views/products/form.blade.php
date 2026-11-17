@@ -32,6 +32,17 @@
     </div>
 
     <div>
+        <label for="product-sku">SKU (opsional)</label>
+        <input
+            id="product-sku"
+            type="text"
+            name="sku"
+            value="{{ old('sku', $product->sku ?? '') }}"
+            maxlength="100"
+        >
+    </div>
+
+    <div>
         <label for="product-category">Kategori</label>
         <select id="product-category" name="category_id" required>
             <option value="">Pilih kategori</option>
@@ -55,7 +66,7 @@
             name="price"
             class="price-input"
             data-money-input
-            value="{{ old('price', isset($product) ? number_format((float) $product->price, 2, '.', ',') : '') }}"
+            value="{{ old('price', isset($product) ? rtrim(rtrim(number_format((float) $product->price, 2, '.', ','), '0'), '.') : '') }}"
             autocomplete="off"
             oninput="formatProductPrice(this)"
             required
@@ -108,12 +119,29 @@
                 <img
                     class="product-catalog-photo product-catalog-photo-large"
                     src="{{ asset('storage/'.$product->image) }}"
-                    alt="Foto {{ $product->name }}"
+                    alt="Foto produk {{ $product->name }}"
                 >
             </p>
         @endif
         <input id="product-image" type="file" name="image" accept="image/*">
         <small>Opsional, maksimal 5 MB.</small>
+    </div>
+
+    <div>
+        <label for="product-mockup">Foto Mockup</label>
+        @if(isset($product) && $product->mockupPaths() !== [])
+            <div class="order-mockup-gallery">
+                @foreach($product->mockupPaths() as $mockupPath)
+                    <img
+                        class="product-catalog-photo product-catalog-photo-large"
+                        src="{{ asset('storage/'.$mockupPath) }}"
+                        alt="Mockup {{ $product->name }}"
+                    >
+                @endforeach
+            </div>
+        @endif
+        <input id="product-mockup" type="file" name="mockups[]" accept="image/*" multiple>
+        <small>Pilih hingga 10 mockup; masing-masing maksimal 5 MB. Mockup digunakan saat produk dan warna yang sama dipilih di order.</small>
     </div>
 
     <datalist id="catalog-color-options">

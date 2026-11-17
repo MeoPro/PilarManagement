@@ -146,10 +146,13 @@ class Order extends Model
             return;
         }
 
+        $productionItems = $items?->reject(fn (OrderItem $item): bool => $item->source === 'Stock');
+
         if ($items !== null && (
             $this->status !== 'None'
             || $items->isEmpty()
-            || $items->contains(fn (OrderItem $item): bool => $item->status !== 'Produksi')
+            || $productionItems->isEmpty()
+            || $productionItems->contains(fn (OrderItem $item): bool => $item->status !== 'Produksi')
         )) {
             return;
         }
@@ -159,18 +162,20 @@ class Order extends Model
                 ->selectRaw(
                     'COUNT(*) AS total_items,
                     SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS ready_items,
-                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS production_items,
-                    SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS finishing_items,
-                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS distributed_items',
-                    ['Ready', 'Produksi', 'Finishing', 'Dalam Perjalanan', 'Distribusi'],
+                    SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS production_items,
+                    SUM(CASE WHEN source != ? THEN 1 ELSE 0 END) AS production_total_items,
+                    SUM(CASE WHEN source != ? AND status IN (?, ?) THEN 1 ELSE 0 END) AS finishing_items,
+                    SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS distributed_items',
+                    ['Ready', 'Stock', 'Produksi', 'Stock', 'Stock', 'Finishing', 'Dalam Perjalanan', 'Stock', 'Distribusi'],
                 )
                 ->first()
             : (object) [
                 'total_items' => $items->count(),
                 'ready_items' => $items->where('status', 'Ready')->count(),
-                'production_items' => $items->where('status', 'Produksi')->count(),
-                'finishing_items' => $items->whereIn('status', ['Finishing', 'Dalam Perjalanan'])->count(),
-                'distributed_items' => $items->where('status', 'Distribusi')->count(),
+                'production_items' => $productionItems->where('status', 'Produksi')->count(),
+                'production_total_items' => $productionItems->count(),
+                'finishing_items' => $productionItems->whereIn('status', ['Finishing', 'Dalam Perjalanan'])->count(),
+                'distributed_items' => $productionItems->where('status', 'Distribusi')->count(),
             ];
 
         if (! $itemStatuses || (int) $itemStatuses->total_items === 0) {
@@ -179,8 +184,10 @@ class Order extends Model
 
         $nextStatus = match (true) {
             (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
-            (int) $itemStatuses->production_items === (int) $itemStatuses->total_items => 'Proses Produksi',
-            (int) $itemStatuses->distributed_items === (int) $itemStatuses->total_items => 'Finishing',
+            (int) $itemStatuses->production_total_items > 0
+                && (int) $itemStatuses->production_items === (int) $itemStatuses->production_total_items => 'Proses Produksi',
+            (int) $itemStatuses->production_total_items > 0
+                && (int) $itemStatuses->distributed_items === (int) $itemStatuses->production_total_items => 'Finishing',
             (int) $itemStatuses->finishing_items > 0 => 'Finishing',
             default => null,
         };

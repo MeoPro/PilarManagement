@@ -313,20 +313,30 @@ class OrderController extends Controller
                     $catalogProduct->update(['price' => $item['price']]);
                 }
 
+                $statusImagePaths = [];
+                if ($catalogProduct instanceof Product && $catalogProduct->mockupPaths() !== []) {
+                    $statusImagePaths = $this->copyCatalogMockups($catalogProduct);
+                }
+                $hasCatalogMockup = $statusImagePaths !== [];
+                $initialStatus = $item['source'] === 'Stock'
+                    ? 'Distribusi'
+                    : ($hasCatalogMockup ? 'Produksi' : 'None');
+
                 $order->items()->create([
                     'product' => $item['product'],
                     'product_id' => $catalogProduct?->id,
+                    'sku' => $this->orderItemSku($item, $catalogProduct),
                     'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                     'qty' => $item['qty'],
                     'price' => $item['price'],
                     'dimensions' => $item['dimensions'] ?? null,
                     'color' => $this->catalogColor($item, $catalogProduct),
                     'source' => $item['source'],
-                    'status' => 'None',
-                    'factory_status' => 'None',
+                    'status' => $initialStatus,
+                    'factory_status' => $item['source'] === 'Stock' ? 'None' : $initialStatus,
                     'image' => $imagePath,
-                    'status_image' => null,
-                    'status_images' => null,
+                    'status_image' => $statusImagePaths[0] ?? null,
+                    'status_images' => $statusImagePaths ?: null,
                 ]);
             }
 
@@ -534,6 +544,15 @@ class OrderController extends Controller
                     $this->deleteStatusImages($statusImagePaths);
                     $statusImagePaths = $this->storeStatusPhotos($statusPhotos);
                 }
+                $catalogProduct = $item->catalogProduct;
+                if (
+                    $nextStatus === 'Produksi'
+                    && $statusPhotos !== []
+                    && $item->source !== 'Stock'
+                    && $catalogProduct !== null
+                ) {
+                    $this->replaceCatalogMockups($catalogProduct, $statusPhotos);
+                }
                 $statusImagePath = $statusImagePaths[0] ?? null;
 
                 if ($nextStatus === 'Produksi' && $previousStatus !== 'Produksi') {
@@ -581,7 +600,7 @@ class OrderController extends Controller
 
     public function edit(Order $order)
     {
-        $order->load(['items.category', 'guest']);
+        $order->load(['items.category', 'items.catalogProduct', 'guest']);
         $order->synchronizeProductionStatusFromItems($order->items);
 
         $categories = Category::orderBy('name')->get();
@@ -699,10 +718,23 @@ class OrderController extends Controller
             $this->rememberGuestPhone($guest->id, $validated['phone'] ?? null);
 
             $existingItemIds = [];
+            $hasNewUnstartedProducts = false;
 
             foreach ($request->items as $index => $item) {
+                $itemId = $item['id'] ?? null;
+                $previousItem = filled($itemId)
+                    ? $previousItems->get((int) $itemId)
+                    : null;
+                if (blank($item['dimensions'] ?? null)) {
+                    $item['dimensions'] = $previousItem?->dimensions;
+                }
+
                 $catalogProduct = $this->resolveCatalogProduct($item, $index, $catalogProducts);
-                if ($catalogProduct === null && blank($item['id'] ?? null)) {
+                if (blank($item['dimensions'] ?? null)) {
+                    $item['dimensions'] = $catalogProduct?->dimensions;
+                }
+
+                if ($catalogProduct === null) {
                     $catalogProduct = $this->createCatalogProduct($item);
                     $catalogProducts->put($catalogProduct->id, $catalogProduct);
                 }
@@ -711,12 +743,9 @@ class OrderController extends Controller
 
                 $total += $subtotal;
 
-                $itemId = $item['id'] ?? null;
-
                 if ($itemId) {
 
                     $orderItem = $order->items()->findOrFail($itemId);
-                    $previousItem = $previousItems->get((int) $itemId);
                     $isLockedProduct = $previousItem !== null && (
                         in_array($previousItem->status, $lockedStatuses, true)
                         || in_array($previousItem->factory_status, $lockedStatuses, true)
@@ -803,11 +832,34 @@ class OrderController extends Controller
                     if ($statusPhotos !== []) {
                         $this->deleteStatusImages($statusImagePaths);
                         $statusImagePaths = $this->storeStatusPhotos($statusPhotos);
+                    } elseif ($catalogProductChanged) {
+                        $this->deleteStatusImages($statusImagePaths);
+                        $statusImagePaths = [];
+                    }
+                    if (
+                        $statusImagePaths === []
+                        && $catalogProduct instanceof Product
+                        && $catalogProduct->mockupPaths() !== []
+                    ) {
+                        $statusImagePaths = $this->copyCatalogMockups($catalogProduct);
                     }
                     $statusImagePath = $statusImagePaths[0] ?? null;
-                    $itemStatus = $statusImagePaths !== [] && $item['status'] === 'None'
+                    $itemStatus = $statusImagePaths !== []
+                        && $item['status'] === 'None'
+                        && $item['source'] !== 'Stock'
                         ? 'Produksi'
                         : $item['status'];
+                    if ($item['source'] === 'Stock' && $itemStatus === 'None') {
+                        $itemStatus = 'Distribusi';
+                    }
+                    if (
+                        $statusPhotos !== []
+                        && $itemStatus === 'Produksi'
+                        && $item['source'] !== 'Stock'
+                        && $catalogProduct !== null
+                    ) {
+                        $this->replaceCatalogMockups($catalogProduct, $statusPhotos);
+                    }
 
                     $previousCompleted = (int) $orderItem->qty_completed;
                     $completedQuantity = $isReturningToProduction ? 0 : $previousCompleted;
@@ -822,6 +874,9 @@ class OrderController extends Controller
                     $orderItem->update([
                         'product' => $item['product'],
                         'product_id' => $catalogProduct?->id,
+                        'sku' => array_key_exists('sku', $item)
+                            ? $this->orderItemSku($item, $catalogProduct)
+                            : ($orderItem->sku ?? $catalogProduct?->sku),
                         'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                         'qty' => $item['qty'],
                         'price' => $item['price'],
@@ -831,7 +886,7 @@ class OrderController extends Controller
                         'status' => $hasActiveSubcontractorAssignments ? $orderItem->status : $itemStatus,
                         'factory_status' => $hasActiveSubcontractorAssignments
                             ? ($itemStatus === 'Ready' ? 'Ready' : $orderItem->factory_status)
-                            : $itemStatus,
+                            : ($item['source'] === 'Stock' && $itemStatus === 'Distribusi' ? 'None' : $itemStatus),
                         'qty_completed' => $completedQuantity,
                         'image' => $imagePath,
                         'status_image' => $statusImagePath,
@@ -847,12 +902,12 @@ class OrderController extends Controller
                         $catalogProduct->update(['price' => $item['price']]);
                     }
 
-                    if ($previousItem && $previousItem->status !== $item['status']) {
+                    if ($previousItem && $previousItem->status !== $orderItem->status) {
                         $this->recordOrderEvent(
                             $order,
                             'item_status_changed',
                             'Status produk berubah',
-                            "{$order->order_id} - {$previousItem->product}: {$previousItem->status} -> {$item['status']}",
+                            "{$order->order_id} - {$previousItem->product}: {$previousItem->status} -> {$orderItem->status}",
                             $orderItem->id,
                         );
                     }
@@ -884,26 +939,37 @@ class OrderController extends Controller
                     if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
                         $catalogProduct->update(['price' => $item['price']]);
                     }
+                    $statusImagePaths = [];
+                    if ($catalogProduct instanceof Product && $catalogProduct->mockupPaths() !== []) {
+                        $statusImagePaths = $this->copyCatalogMockups($catalogProduct);
+                    }
+                    $hasCatalogMockup = $statusImagePaths !== [];
+                    $initialStatus = $item['source'] === 'Stock'
+                        ? 'Distribusi'
+                        : ($hasCatalogMockup ? 'Produksi' : 'None');
+                    $hasNewUnstartedProducts = $hasNewUnstartedProducts || $initialStatus === 'None';
                     $newItem = $order->items()->create([
                         'product' => $item['product'],
                         'product_id' => $catalogProduct?->id,
+                        'sku' => $this->orderItemSku($item, $catalogProduct),
                         'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                         'qty' => $item['qty'],
                         'price' => $item['price'],
+                        'dimensions' => $item['dimensions'] ?? null,
                         'color' => $this->catalogColor($item, $catalogProduct),
                         'source' => $item['source'],
-                        'status' => 'None',
-                        'factory_status' => 'None',
+                        'status' => $initialStatus,
+                        'factory_status' => $item['source'] === 'Stock' ? 'None' : $initialStatus,
                         'image' => $imagePath,
-                        'status_image' => null,
-                        'status_images' => null,
+                        'status_image' => $statusImagePaths[0] ?? null,
+                        'status_images' => $statusImagePaths ?: null,
                     ]);
 
                     $this->recordOrderEvent(
                         $order,
                         'item_added',
                         'Produk ditambahkan',
-                        "{$order->order_id} - {$newItem->product} (status awal: {$newItem->status})",
+                        "{$order->order_id} - {$newItem->product} (status awal: {$initialStatus})",
                         $newItem->id,
                     );
 
@@ -929,6 +995,20 @@ class OrderController extends Controller
                 'total_order' => $total,
             ]);
             $order->synchronizeProductionStatusFromItems();
+
+            if ($hasNewUnstartedProducts && ! in_array($order->status, ['None', 'Selesai', 'Cancel'], true)) {
+                $previousStatus = $order->status;
+                $order->update([
+                    'status' => 'None',
+                    'last_edit' => now(),
+                ]);
+                $this->recordOrderEvent(
+                    $order,
+                    'order_status_changed',
+                    'Status order berubah otomatis',
+                    "{$order->order_id}: {$previousStatus} -> None (menunggu mockup produk baru)",
+                );
+            }
         });
 
         return redirect()
@@ -1037,6 +1117,8 @@ class OrderController extends Controller
                 'exists:products,id',
             ],
 
+            'items.*.sku' => ['nullable', 'string', 'max:100'],
+
             'items.*.dimensions' => ['nullable', 'string', 'max:100', 'regex:'.Product::DIMENSIONS_PATTERN],
 
             'items.*.category_id' => [
@@ -1051,10 +1133,7 @@ class OrderController extends Controller
 
             'items.*.color' => 'nullable|string|max:255',
 
-            'items.*.source' => [
-                'required',
-                'in:Stock,Order,Mix,Service',
-            ],
+            'items.*.source' => 'required|string|max:255',
 
             'items.*.status' => $order === null
                 ? ['sometimes', Rule::in(['None'])]
@@ -1083,6 +1162,8 @@ class OrderController extends Controller
         ], [
             'order_id.unique' => 'SPK sudah digunakan.',
         ]);
+        $this->validateProductSources($validated['items'], $order);
+
         foreach ($validated['items'] as $index => $item) {
             if (($order === null || blank($item['id'] ?? null)) && blank($item['dimensions'] ?? null)) {
                 throw ValidationException::withMessages([
@@ -1151,6 +1232,47 @@ class OrderController extends Controller
         }
 
         return $validated;
+    }
+
+    private function validateProductSources(array $items, ?Order $order): void
+    {
+        $itemIds = collect($items)
+            ->pluck('id')
+            ->filter()
+            ->map(fn ($itemId): int => (int) $itemId);
+        $existingItems = $order === null
+            ? collect()
+            : $order->items()->whereIn('id', $itemIds)->get()->keyBy('id');
+
+        foreach ($items as $index => $item) {
+            $source = $item['source'];
+            $existingItem = $existingItems->get((int) ($item['id'] ?? 0));
+
+            if (in_array($source, ['Stock', 'Order'], true)) {
+                $submittedStatus = $item['status'] ?? 'None';
+                $unchangedStockStatus = $existingItem?->source === 'Stock'
+                    && $existingItem->status === $submittedStatus;
+
+                if ($source === 'Stock' && $submittedStatus !== 'None' && ! $unchangedStockStatus) {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.status" => 'Produk Stock langsung masuk antrean PB dan tidak dapat diproses di Factory.',
+                    ]);
+                }
+
+                continue;
+            }
+
+            if (
+                in_array($source, ['Mix', 'Service'], true)
+                && $existingItem?->source === $source
+            ) {
+                continue;
+            }
+
+            throw ValidationException::withMessages([
+                "items.{$index}.source" => 'Sumber produk hanya dapat berupa Stock atau Order.',
+            ]);
+        }
     }
 
     /**
@@ -1262,10 +1384,36 @@ class OrderController extends Controller
 
     private function guestOptions()
     {
-        return Guest::query()
+        $guests = Guest::query()
             ->with('phones')
             ->orderByRaw('LOWER(name)')
-            ->get(['id', 'name', 'address']);
+            ->get(['id', 'name', 'guest_source', 'address']);
+        $guestsWithoutSource = $guests
+            ->whereNull('guest_source')
+            ->modelKeys();
+
+        if ($guestsWithoutSource === []) {
+            return $guests;
+        }
+
+        $latestOrdersByGuest = Order::query()
+            ->whereIn('guest_id', $guestsWithoutSource)
+            ->whereNotNull('guest_source')
+            ->where('guest_source', '!=', '')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->get(['guest_id', 'guest_source'])
+            ->unique('guest_id')
+            ->keyBy('guest_id');
+
+        return $guests->each(function (Guest $guest) use ($latestOrdersByGuest): void {
+            if (blank($guest->guest_source)) {
+                $guest->setAttribute(
+                    'guest_source',
+                    $latestOrdersByGuest->get($guest->id)?->guest_source,
+                );
+            }
+        });
     }
 
     private function rememberGuestPhone(int $guestId, ?string $phone): void
@@ -1283,16 +1431,27 @@ class OrderController extends Controller
     }
 
     /**
-     * @return list<array{name: string, category_id: int|null, category_name: string|null, dimensions: string|null}>
+     * @return list<array{name: string, sku: string|null, color: string|null, category_id: int|null, category_name: string|null, dimensions: string|null}>
      */
     private function productOptions(): array
     {
         $latestItemIds = OrderItem::query()
             ->selectRaw('MAX(id) AS id')
-            ->groupBy('product')
+            ->groupBy('product', 'color')
             ->orderByDesc('id')
-            ->limit(200)
             ->pluck('id');
+        $latestDimensionItemIds = OrderItem::query()
+            ->whereNotNull('dimensions')
+            ->where('dimensions', '!=', '')
+            ->selectRaw('MAX(id) AS id')
+            ->groupBy('product', 'color')
+            ->pluck('id');
+        $latestDimensions = OrderItem::query()
+            ->whereIn('id', $latestDimensionItemIds)
+            ->get(['product', 'color', 'dimensions'])
+            ->mapWithKeys(fn (OrderItem $item): array => [
+                serialize([$item->product, $item->color]) => $item->dimensions,
+            ]);
 
         return OrderItem::query()
             ->with('category:id,name')
@@ -1301,30 +1460,39 @@ class OrderController extends Controller
             ->get()
             ->map(fn (OrderItem $item): array => [
                 'name' => $item->product,
+                'sku' => $item->sku,
+                'color' => $item->color,
                 'category_id' => $item->category_id,
                 'category_name' => $item->category?->name,
-                'dimensions' => $item->dimensions,
+                'dimensions' => $item->dimensions
+                    ?: $latestDimensions->get(serialize([$item->product, $item->color])),
             ])
             ->all();
     }
 
     /**
-     * @return list<array{id: int, name: string, category_id: int|null, category_name: string|null, price: float, dimensions: string|null, colors: list<string>}>
+     * @return list<array{id: int, name: string, sku: string|null, category_id: int|null, category_name: string|null, price: float, dimensions: string|null, colors: list<string>, mockup_urls: list<string>}>
      */
     private function catalogProductOptions(): array
     {
         return Product::query()
             ->with('category:id,name')
             ->orderBy('name')
+            ->orderBy('id')
             ->get()
             ->map(fn (Product $product): array => [
                 'id' => $product->id,
                 'name' => $product->name,
+                'sku' => $product->sku,
                 'category_id' => $product->category_id,
                 'category_name' => $product->category?->name,
                 'price' => (float) $product->price,
                 'dimensions' => $product->dimensions,
                 'colors' => array_values(array_filter($product->colors ?? [], 'is_string')),
+                'mockup_urls' => array_map(
+                    fn (string $mockupPath): string => Storage::disk('public')->url($mockupPath),
+                    $product->mockupPaths(),
+                ),
             ])
             ->all();
     }
@@ -1358,6 +1526,7 @@ class OrderController extends Controller
                     $query->{$method}(DB::raw('LOWER(name)'), $productNames);
                 }
             })
+            ->orderBy('id')
             ->get()
             ->keyBy('id');
     }
@@ -1368,28 +1537,51 @@ class OrderController extends Controller
      */
     private function resolveCatalogProduct(array $item, int|string $index, EloquentCollection $catalogProducts): ?Product
     {
-        if (empty($item['product_id'])) {
-            $productName = mb_strtolower(trim($item['product']));
+        $productName = mb_strtolower(trim($item['product']));
+        $matchingProducts = $catalogProducts->filter(
+            fn (Product $product): bool => mb_strtolower($product->name) === $productName,
+        );
+        $requestedColor = trim((string) ($item['color'] ?? ''));
+        $catalogProduct = null;
 
-            return $catalogProducts->first(
-                fn (Product $product): bool => mb_strtolower($product->name) === $productName,
-            );
+        if (filled($item['product_id'] ?? null)) {
+            $catalogProduct = $catalogProducts->get((int) $item['product_id']);
+            if (! $catalogProduct instanceof Product) {
+                throw ValidationException::withMessages([
+                    "items.$index.product_id" => 'Produk katalog tidak ditemukan.',
+                ]);
+            }
+
+            if ($productName !== mb_strtolower($catalogProduct->name)) {
+                throw ValidationException::withMessages([
+                    "items.$index.product" => 'Nama produk tidak cocok dengan produk katalog yang dipilih.',
+                ]);
+            }
+        } else {
+            $catalogProduct = $matchingProducts->first(
+                fn (Product $product): bool => $this->catalogProductHasColor($product, $requestedColor),
+            ) ?? $matchingProducts->first();
         }
 
-        $catalogProduct = $catalogProducts->get((int) $item['product_id']);
-        if (! $catalogProduct instanceof Product) {
-            throw ValidationException::withMessages([
-                "items.$index.product_id" => 'Produk katalog tidak ditemukan.',
-            ]);
+        if (! $catalogProduct instanceof Product || $requestedColor === '') {
+            return $catalogProduct;
         }
 
-        if (mb_strtolower(trim($item['product'])) !== mb_strtolower($catalogProduct->name)) {
-            throw ValidationException::withMessages([
-                "items.$index.product" => 'Nama produk tidak cocok dengan produk katalog yang dipilih.',
-            ]);
+        $matchingVariant = $matchingProducts->first(
+            fn (Product $product): bool => $this->catalogProductHasColor($product, $requestedColor),
+        );
+        if ($matchingVariant instanceof Product) {
+            return $matchingVariant;
         }
 
-        return $catalogProduct;
+        if ($this->catalogProductHasColor($catalogProduct, $requestedColor)) {
+            return $catalogProduct;
+        }
+
+        $variant = $this->createCatalogVariant($catalogProduct, $item, $requestedColor);
+        $catalogProducts->put($variant->id, $variant);
+
+        return $variant;
     }
 
     /**
@@ -1401,11 +1593,66 @@ class OrderController extends Controller
 
         return Product::create([
             'name' => trim($item['product']),
+            'sku' => $this->normalizeSku($item),
             'category_id' => $item['category_id'] ?? null,
             'price' => $item['price'],
-            'dimensions' => $item['dimensions'],
+            'dimensions' => $item['dimensions'] ?? null,
             'colors' => $color === '' ? [] : [$color],
         ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function createCatalogVariant(Product $catalogProduct, array $item, string $color): Product
+    {
+        return Product::create([
+            'name' => $catalogProduct->name,
+            'sku' => $this->normalizeSku($item),
+            'category_id' => $item['category_id'] ?? $catalogProduct->category_id,
+            'price' => $item['price'],
+            'dimensions' => filled($item['dimensions'] ?? null)
+                ? $item['dimensions']
+                : $catalogProduct->dimensions,
+            'colors' => [$color],
+            'image' => null,
+            'mockup' => null,
+            'mockups' => null,
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function orderItemSku(array $item, ?Product $catalogProduct): ?string
+    {
+        return $this->normalizeSku($item) ?? $catalogProduct?->sku;
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function normalizeSku(array $item): ?string
+    {
+        $sku = trim((string) ($item['sku'] ?? ''));
+
+        return $sku === '' ? null : $sku;
+    }
+
+    private function catalogProductHasColor(Product $product, string $color): bool
+    {
+        $normalizedColor = mb_strtolower(trim($color));
+        if ($normalizedColor === '') {
+            return false;
+        }
+
+        foreach ($product->colors ?? [] as $productColor) {
+            if (is_string($productColor) && mb_strtolower(trim($productColor)) === $normalizedColor) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function catalogColor(array $item, ?Product $catalogProduct): ?string
@@ -1422,23 +1669,82 @@ class OrderController extends Controller
 
     private function copyCatalogImage(Product $product): ?string
     {
-        if ($product->image === null) {
+        return $this->copyCatalogAsset(
+            $product->image,
+            'Foto produk katalog tidak ditemukan di penyimpanan.',
+            'Foto produk katalog gagal disalin ke order.',
+        );
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function copyCatalogMockups(Product $product): array
+    {
+        $mockupPaths = [];
+
+        foreach ($product->mockupPaths() as $mockupPath) {
+            $orderMockupPath = $this->copyCatalogAsset(
+                $mockupPath,
+                'Mockup produk katalog tidak ditemukan di penyimpanan.',
+                'Mockup produk katalog gagal disalin ke order.',
+            );
+            if ($orderMockupPath !== null) {
+                $mockupPaths[] = $orderMockupPath;
+            }
+        }
+
+        return $mockupPaths;
+    }
+
+    private function copyCatalogAsset(?string $catalogAssetPath, string $missingMessage, string $copyErrorMessage): ?string
+    {
+        if ($catalogAssetPath === null) {
             return null;
         }
 
         $disk = Storage::disk('public');
-        if (! $disk->exists($product->image)) {
-            throw new RuntimeException('Foto produk katalog tidak ditemukan di penyimpanan.');
+        if (! $disk->exists($catalogAssetPath)) {
+            throw new RuntimeException($missingMessage);
         }
 
-        $extension = pathinfo($product->image, PATHINFO_EXTENSION);
-        $imagePath = 'orders/products/'.Str::uuid().($extension !== '' ? '.'.$extension : '');
+        $extension = pathinfo($catalogAssetPath, PATHINFO_EXTENSION);
+        $orderAssetPath = 'orders/products/'.Str::uuid().($extension !== '' ? '.'.$extension : '');
 
-        if (! $disk->copy($product->image, $imagePath)) {
-            throw new RuntimeException('Foto produk katalog gagal disalin ke order.');
+        if (! $disk->copy($catalogAssetPath, $orderAssetPath)) {
+            throw new RuntimeException($copyErrorMessage);
         }
 
-        return $imagePath;
+        return $orderAssetPath;
+    }
+
+    /**
+     * @param  list<UploadedFile>  $mockups
+     */
+    private function replaceCatalogMockups(Product $product, array $mockups): void
+    {
+        $mockupPaths = [];
+
+        foreach ($mockups as $mockup) {
+            $mockupPath = $mockup->store('catalog/mockups', 'public');
+            if (! is_string($mockupPath)) {
+                throw new RuntimeException('Mockup produk gagal disimpan ke katalog.');
+            }
+
+            $mockupPaths[] = $mockupPath;
+        }
+
+        $previousMockupPaths = $product->mockupPaths();
+        $product->update([
+            'mockup' => $mockupPaths[0] ?? null,
+            'mockups' => $mockupPaths ?: null,
+        ]);
+
+        foreach ($previousMockupPaths as $previousMockupPath) {
+            if (! in_array($previousMockupPath, $mockupPaths, true)) {
+                Storage::disk('public')->delete($previousMockupPath);
+            }
+        }
     }
 
     private function syncGuestAddress(Guest $guest, array $validated): void

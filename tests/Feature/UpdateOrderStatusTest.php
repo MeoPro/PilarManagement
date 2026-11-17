@@ -68,7 +68,7 @@ test('form order menampilkan warna katalog dan warna lama pada edit', function (
 
     $editResponse = $this->get(route('orders.edit', $order));
     $editResponse->assertSee('Legacy Pearl')
-        ->assertSee('Service');
+        ->assertDontSee('<option value="Service"', false);
 });
 
 test('form order suggests products and selectable categories and preselects the guest source', function () {
@@ -1086,7 +1086,7 @@ test('form order baru tidak menyediakan pilihan status order', function () {
     $response = $this->get(route('orders.create'));
 
     $response->assertSee('Status Order')
-        ->assertSee('Service')
+        ->assertDontSee('<option value="Service"', false)
         ->assertSee('Sumber Tamu')
         ->assertSee('Lokasi Tujuan')
         ->assertSee('Ekspor')
@@ -1119,7 +1119,7 @@ test('form order baru tidak menyediakan pilihan status order', function () {
         ->assertDontSee('<select name="status">', false);
 });
 
-test('produk order baru selalu New dan tidak muncul di Factory sebelum mockup diunggah', function () {
+test('produk Stock baru masuk antrean distribusi PB dan tidak muncul di Factory', function () {
     Storage::fake('public');
     $guest = Guest::create(['name' => 'Guest']);
 
@@ -1155,7 +1155,7 @@ test('produk order baru selalu New dan tidak muncul di Factory sebelum mockup di
 
     expect($order->status)->toBe('None')
         ->and($order->guest_source)->toBe('Online')
-        ->and($item->status)->toBe('None')
+        ->and($item->status)->toBe('Distribusi')
         ->and($item->factory_status)->toBe('None')
         ->and($item->status_image)->toBeNull();
 
@@ -1318,6 +1318,62 @@ test('stale new order status is reconciled when the order edit page is opened', 
     ]);
 });
 
+test('order returns to new when an unstarted product is added to an order in production', function () {
+    $guest = Guest::create(['name' => 'Additional Product Guest']);
+    $order = Order::create([
+        'order_id' => 'ADD-ITEM-AFTER-PRODUCTION',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 100,
+        'status' => 'Proses Produksi',
+    ]);
+    $existingItem = $order->items()->create([
+        'product' => 'Existing Production Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+    ]);
+
+    $response = $this->put(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'items' => [
+            [
+                'id' => $existingItem->id,
+                'product' => $existingItem->product,
+                'qty' => 1,
+                'price' => 100,
+                'source' => 'Order',
+                'status' => 'Produksi',
+            ],
+            [
+                'product' => 'New Guest Addition',
+                'dimensions' => '10x10x10',
+                'qty' => 1,
+                'price' => 100,
+                'source' => 'Order',
+                'status' => 'None',
+            ],
+        ],
+    ]);
+
+    $response->assertRedirect(route('orders.index'));
+
+    $newItem = $order->items()->where('product', 'New Guest Addition')->firstOrFail();
+    $this->assertDatabaseHas('order_events', [
+        'order_id' => $order->id,
+        'type' => 'order_status_changed',
+        'description' => 'ADD-ITEM-AFTER-PRODUCTION: Proses Produksi -> None (menunggu mockup produk baru)',
+    ]);
+
+    expect($order->fresh()->status)->toBe('None')
+        ->and($newItem->status)->toBe('None');
+});
+
 test('orders with production progress cannot be deleted', function () {
     $order = Order::create([
         'order_id' => 'PRODUCTION-DELETE-GUARD',
@@ -1371,6 +1427,10 @@ test('order accepts a custom guest source and the new destination values', funct
         'guest_source' => 'Wedding Organizer',
         'order_type' => 'Luar Bali',
     ]);
+    $this->assertDatabaseHas('guests', [
+        'id' => $guest->id,
+        'guest_source' => 'Wedding Organizer',
+    ]);
 });
 
 test('order list reports ready percentage using total item quantity', function () {
@@ -1404,34 +1464,191 @@ test('order list reports ready percentage using total item quantity', function (
         ->assertSeeText('3/4 unit');
 });
 
-test('order menerima dan menyimpan sumber produk service', function () {
-    $guest = Guest::create(['name' => 'Service Guest']);
-
-    $response = $this->post(route('orders.store'), [
-        'order_id' => 'ORD-SERVICE',
-        'guest_id' => $guest->id,
-        'guest_name' => 'Service Guest',
+test('order rejects retired product sources for new items', function (string $source) {
+    $response = $this->from(route('orders.create'))->post(route('orders.store'), [
+        'order_id' => 'ORD-RETIRED-SOURCE-'.$source,
+        'guest_name' => 'Retired Source Guest',
         'guest_source' => 'Lokal',
         'order_type' => 'Luar Bali',
         'status' => 'None',
         'items' => [
             [
-                'product' => 'Room Service',
+                'product' => 'Retired Source Product',
                 'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 50000,
-                'source' => 'Service',
+                'source' => $source,
                 'status' => 'None',
             ],
         ],
     ]);
 
-    $response->assertRedirect(route('orders.index'));
+    $response->assertSessionHasErrors('items.0.source');
+
+    $this->assertDatabaseMissing('order_items', [
+        'product' => 'Retired Source Product',
+    ]);
+})->with(['Mix', 'Service']);
+
+test('order source menus remove Mix and Service while retaining legacy values for existing items', function () {
+    $createResponse = $this->get(route('orders.create'));
+    $createResponse->assertDontSee('value="Mix"', false)
+        ->assertDontSee('value="Service"', false);
+
+    $guest = Guest::create(['name' => 'Legacy Source Guest']);
+    $order = Order::create([
+        'order_id' => 'ORD-LEGACY-SOURCE',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'total_order' => 100,
+        'status' => 'None',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Legacy Service',
+        'dimensions' => '10x10x10',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Service',
+        'status' => 'None',
+    ]);
+
+    $editResponse = $this->get(route('orders.edit', $order));
+    $editResponse->assertDontSee('<option value="Mix"', false)
+        ->assertDontSee('<option value="Service"', false)
+        ->assertSee('name="items[0][source]" value="Service"', false);
+
+    $this->put(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'paid_amount' => 0,
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'dimensions' => $item->dimensions,
+            'qty' => $item->qty,
+            'price' => $item->price,
+            'source' => 'Service',
+            'status' => 'None',
+        ]],
+    ])->assertRedirect(route('orders.index'));
 
     $this->assertDatabaseHas('order_items', [
-        'product' => 'Room Service',
+        'id' => $item->id,
         'source' => 'Service',
     ]);
+});
+
+test('Stock items do not block made-to-order items from starting production', function () {
+    $order = Order::create([
+        'order_id' => 'STOCK-AND-PRODUCTION',
+        'guest_name' => 'Mixed Source Guest',
+        'total_order' => 200,
+        'status' => 'None',
+    ]);
+    $order->items()->create([
+        'product' => 'Existing Stock',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Distribusi',
+        'factory_status' => 'None',
+    ]);
+    $order->items()->create([
+        'product' => 'Made To Order Chair',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Proses Produksi');
+});
+
+test('Stock backfill moves only unstarted items into PB distribution', function () {
+    $order = Order::create([
+        'order_id' => 'STOCK-BACKFILL',
+        'guest_name' => 'Stock Backfill Guest',
+        'total_order' => 200,
+        'status' => 'None',
+    ]);
+    $unstartedStock = $order->items()->create([
+        'product' => 'Unstarted Stock',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'None',
+        'factory_status' => 'None',
+    ]);
+    $progressedStock = $order->items()->create([
+        'product' => 'Progressed Stock',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
+
+    $migration = require database_path('migrations/2026_11_17_181833_move_existing_stock_items_to_pb_distribution_queue.php');
+    $migration->up();
+
+    expect($unstartedStock->fresh()->status)->toBe('Distribusi')
+        ->and($unstartedStock->fresh()->factory_status)->toBe('None')
+        ->and($progressedStock->fresh()->status)->toBe('Produksi');
+});
+
+test('adding a Stock item to an existing order sends it directly to the PB queue', function () {
+    Storage::fake('public');
+    $guest = Guest::create(['name' => 'Updated Stock Guest']);
+    $order = Order::create([
+        'order_id' => 'UPDATED-STOCK-ITEM',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'total_order' => 10000,
+        'status' => 'None',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Updated Stock Chair',
+        'dimensions' => '10x10x10',
+        'qty' => 1,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'None',
+        'factory_status' => 'None',
+    ]);
+
+    $this->patch(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'paid_amount' => 0,
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'dimensions' => $item->dimensions,
+            'qty' => $item->qty,
+            'price' => $item->price,
+            'source' => 'Stock',
+            'status' => 'None',
+            'status_images' => [
+                UploadedFile::fake()->create('stock-inspection.jpg', 100, 'image/jpeg'),
+            ],
+        ]],
+    ])->assertRedirect(route('orders.index'));
+
+    expect($item->fresh()->status)->toBe('Distribusi')
+        ->and($item->fresh()->factory_status)->toBe('None');
 });
 
 test('order baru menolak order id yang sudah digunakan', function () {

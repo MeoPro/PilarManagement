@@ -49,6 +49,12 @@
                 >
             </div>
 
+            <div class="login-remember">
+                <input id="remember" type="checkbox" name="remember" value="1" checked>
+                <label for="remember">Tetap masuk di perangkat ini</label>
+                <small>Hapus centang jika menggunakan perangkat bersama.</small>
+            </div>
+
             <button class="btn btn-primary" type="submit">Masuk ke Dashboard</button>
         </form>
 

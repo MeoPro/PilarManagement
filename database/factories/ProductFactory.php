@@ -20,10 +20,13 @@ class ProductFactory extends Factory
     {
         return [
             'name' => fake()->unique()->words(3, true),
+            'sku' => null,
             'category_id' => Category::factory(),
             'price' => fake()->randomFloat(2, 10000, 500000),
             'colors' => [],
             'image' => null,
+            'mockup' => null,
+            'mockups' => [],
         ];
     }
 }

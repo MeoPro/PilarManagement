@@ -35,6 +35,7 @@
 
 
     <form
+        class="order-create-form"
         action="{{ route('orders.update', $order) }}"
         method="POST"
         enctype="multipart/form-data"
@@ -48,11 +49,11 @@
 
         {{-- ORDER --}}
 
-        <div class="card">
+        <div class="card order-form-section">
 
-            <h2>Order Information</h2>
+            <h2>Informasi Order</h2>
 
-            <div class="row">
+            <div class="row order-form-grid">
 
                 <div class="form-group">
 
@@ -163,14 +164,8 @@
 
                 </div>
 
-                <div class="form-group">
-                    <label>Alamat Tamu (opsional)</label>
-                    <textarea name="guest_address" rows="2">{{ old('guest_address', $order->guest?->address) }}</textarea>
-                </div>
-
-
                 <div
-                    class="form-group"
+                    class="form-group order-form-deadline-control"
                     data-deadline-control
                     data-deadline-today="{{ today()->toDateString() }}"
                 >
@@ -201,32 +196,38 @@
 
                     <label>Status Order</label>
 
-                    <div>{{ $order->status === 'None' ? 'New' : $order->status }}</div>
+                    <span class="order-form-status">{{ $order->status === 'None' ? 'New' : $order->status }}</span>
 
                 </div>
 
             </div>
 
 
-            <div class="form-group">
-
-                <label>Note</label>
-
-                <textarea
-                    name="note"
-                    rows="4"
-                >{{ old('note', $order->note) }}</textarea>
-
-            </div>
+            <details
+                class="order-form-optional-fields"
+                @if(old('guest_address') || old('note') || $errors->has('guest_address') || $errors->has('note')) open @endif
+            >
+                <summary>Alamat dan catatan tambahan</summary>
+                <div class="order-form-optional-grid">
+                    <div class="form-group">
+                        <label for="guest-address">Alamat Tamu (opsional)</label>
+                        <textarea id="guest-address" name="guest_address" rows="2">{{ old('guest_address', $order->guest?->address) }}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="order-note">Catatan Order (opsional)</label>
+                        <textarea id="order-note" name="note" rows="2">{{ old('note', $order->note) }}</textarea>
+                    </div>
+                </div>
+            </details>
 
         </div>
 
 
         {{-- PRODUCTS --}}
 
-        <div class="card">
+        <div class="card order-form-section">
 
-            <div style="display:flex;justify-content:space-between;">
+            <div class="order-form-product-heading">
 
                 <h2>List Produk</h2>
 
@@ -241,22 +242,22 @@
             </div>
 
 
-            <table>
+            <div class="table-wrapper order-form-products-table">
+                <table>
 
                 <thead>
 
                     <tr>
 
                         <th>Produk</th>
-                        <th>Category</th>
+                        <th>Kategori</th>
                         <th>Ukuran (P x L x T)</th>
                         <th>Qty</th>
                         <th>Harga</th>
                         <th>Warna</th>
                         <th>Sumber</th>
                         <th>Status</th>
-                        <th>Mockup Produk</th>
-                        <th>Action</th>
+                        <th>Aksi</th>
 
                     </tr>
 
@@ -285,23 +286,64 @@
                                 {{ $item->product }}
                                 <input type="hidden" name="items[{{ $index }}][product]" value="{{ $item->product }}">
                                 <input type="hidden" name="items[{{ $index }}][product_id]" value="{{ $item->product_id }}">
+                                @if($item->sku)
+                                    <small>SKU: {{ $item->sku }}</small>
+                                @endif
+                                <input type="hidden" name="items[{{ $index }}][sku]" value="{{ $item->sku }}">
                             @else
+                            <div class="product-selector">
+                                <input
+                                    id="product-input-{{ $index }}"
+                                    type="text"
+                                    name="items[{{ $index }}][product]"
+                                    autocomplete="off"
+                                    role="combobox"
+                                    aria-autocomplete="list"
+                                    aria-expanded="false"
+                                    aria-controls="product-suggestions-{{ $index }}"
+                                    placeholder="Ketik nama produk"
+                                    oninput="handleProductInput(this)"
+                                    onfocus="showProductSuggestions(this)"
+                                    onkeydown="handleProductSuggestionKeydown(event, this)"
+                                    onblur="closeProductSuggestions(this)"
+                                    value="{{ $item->product }}"
+                                    required
+                                >
+                                <input
+                                    type="hidden"
+                                    name="items[{{ $index }}][product_id]"
+                                    class="catalog-product-id"
+                                    value="{{ $item->product_id }}"
+                                >
+                                <div
+                                    id="product-suggestions-{{ $index }}"
+                                    class="product-suggestions"
+                                    role="listbox"
+                                    hidden
+                                ></div>
+                            </div>
                             <input
                                 type="text"
-                                name="items[{{ $index }}][product]"
-                                list="product-options"
-                                autocomplete="off"
-                                oninput="updateProductDetails(this)"
-                                value="{{ $item->product }}"
-                                required
-                            >
-                            <input
-                                type="hidden"
-                                name="items[{{ $index }}][product_id]"
-                                class="catalog-product-id"
-                                value="{{ $item->product_id }}"
+                                name="items[{{ $index }}][sku]"
+                                value="{{ old("items.$index.sku", $item->sku) }}"
+                                maxlength="100"
+                                aria-label="SKU produk (opsional)"
+                                placeholder="SKU (opsional)"
                             >
                             @endif
+                            <div
+                                class="order-mockup-gallery"
+                                data-catalog-mockup-preview
+                                @if(! $item->catalogProduct?->mockupPaths()) hidden @endif
+                            >
+                                @foreach($item->catalogProduct?->mockupPaths() ?? [] as $mockupPath)
+                                    <img
+                                        class="product-catalog-photo"
+                                        src="{{ asset('storage/'.$mockupPath) }}"
+                                        alt="Mockup {{ $item->product }}"
+                                    >
+                                @endforeach
+                            </div>
 
                         </td>
 
@@ -422,6 +464,7 @@
                                     autocomplete="off"
                                     placeholder="Cari warna"
                                     value="{{ $item->color }}"
+                                    oninput="updateCatalogProductForColor(this)"
                                 >
 
                                 <button
@@ -443,12 +486,15 @@
                             @if($itemIsLocked)
                                 {{ $item->source }}
                                 <input type="hidden" name="items[{{ $index }}][source]" value="{{ $item->source }}">
+                            @elseif(in_array($item->source, ['Mix', 'Service'], true))
+                                {{ $item->source }}
+                                <input type="hidden" name="items[{{ $index }}][source]" value="{{ $item->source }}">
                             @else
                             <select
                                 name="items[{{ $index }}][source]"
                             >
 
-                                @foreach(['Stock','Order','Mix','Service'] as $source)
+                                @foreach(['Stock','Order'] as $source)
 
                                     <option
                                         value="{{ $source }}"
@@ -470,6 +516,7 @@
                             @if($itemIsLocked)
                                 {{ $item->status }}
                                 <input type="hidden" name="items[{{ $index }}][status]" value="{{ $item->status }}">
+                                <small>Mockup terkunci setelah Produksi</small>
                             @else
                             <select
                                 name="items[{{ $index }}][status]"
@@ -503,32 +550,23 @@
                                     <span class="form-error">{{ $message }}</span>
                                 @enderror
                             @endif
-                            @endif
-
-                        </td>
-
-
-                        <td>
-
-                            @if($itemIsLocked)
-                                <span>Mockup terkunci setelah Produksi</span>
-                            @else
-                            <label for="status-image-{{ $item->id }}">Mockup produk (maksimal 10 foto)</label>
-                            <input
-                                id="status-image-{{ $item->id }}"
-                                type="file"
-                                name="items[{{ $index }}][status_images][]"
-                                accept="image/jpeg,image/png,image/webp"
-                                multiple
-                                data-status-photo-input
-                            >
+                            <label class="order-edit-status-upload" for="status-image-{{ $item->id }}">
+                                <span>Mockup produk (maksimal 10 foto)</span>
+                                <input
+                                    id="status-image-{{ $item->id }}"
+                                    type="file"
+                                    name="items[{{ $index }}][status_images][]"
+                                    accept="image/jpeg,image/png,image/webp"
+                                    multiple
+                                    data-status-photo-input
+                                >
+                            </label>
                             @error("items.$index.status_images")
                                 <span class="form-error">{{ $message }}</span>
                             @enderror
                             @endif
 
                         </td>
-
 
                         <td>
 
@@ -551,20 +589,16 @@
                     </tr>
 
                 @endforeach
-
                 </tbody>
+                </table>
+            </div>
 
-            </table>
 
+            <div class="order-form-product-total">
+                <strong>Total: Rp <span id="total-display">0</span></strong>
+            </div>
 
-            <h2 style="text-align:right;">
-
-                Total:
-                Rp <span id="total-display">0</span>
-
-            </h2>
-
-            <div class="form-group order-payment-field">
+            <div class="form-group order-payment-field order-form-payment-field">
                 <label for="paid_amount">Total pembayaran / DP yang sudah diterima (Rp)</label>
                 <input
                     id="paid_amount"
@@ -583,20 +617,10 @@
         </div>
 
 
-        <button
-            type="submit"
-            class="btn btn-primary"
-        >
-            Update Order
-        </button>
-
-
-        <a
-            href="{{ route('orders.index') }}"
-            class="btn btn-secondary"
-        >
-            Cancel
-        </a>
+        <div class="order-form-actions">
+            <button type="submit" class="btn btn-primary">Simpan Perubahan</button>
+            <a href="{{ route('orders.index') }}" class="btn btn-secondary">Batal</a>
+        </div>
 
     </form>
 
@@ -609,17 +633,6 @@
     @endforeach
 </datalist>
 
-
-<datalist id="product-options">
-    @foreach($catalogProducts as $catalogProduct)
-        <option value="{{ $catalogProduct['name'] }}"></option>
-    @endforeach
-    @foreach($productOptions as $productOption)
-        @unless(collect($catalogProducts)->contains(fn ($catalogProduct) => mb_strtolower($catalogProduct['name']) === mb_strtolower($productOption['name'])))
-            <option value="{{ $productOption['name'] }}"></option>
-        @endunless
-    @endforeach
-</datalist>
 
 <datalist id="category-options">
     @foreach($categories as $category)
@@ -837,19 +850,47 @@
         row.innerHTML = `
 
             <td>
+                <div class="product-selector">
+                    <input
+                        type="text"
+                        name="items[${productIndex}][product]"
+                        autocomplete="off"
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-expanded="false"
+                        aria-controls="product-suggestions-${productIndex}"
+                        placeholder="Ketik nama produk"
+                        oninput="handleProductInput(this)"
+                        onfocus="showProductSuggestions(this)"
+                        onkeydown="handleProductSuggestionKeydown(event, this)"
+                        onblur="closeProductSuggestions(this)"
+                        required
+                    >
+                    <input
+                        type="hidden"
+                        name="items[${productIndex}][product_id]"
+                        class="catalog-product-id"
+                    >
+                    <div
+                        id="product-suggestions-${productIndex}"
+                        class="product-suggestions"
+                        role="listbox"
+                        hidden
+                    ></div>
+                </div>
                 <input
                     type="text"
-                    name="items[${productIndex}][product]"
-                    list="product-options"
-                    autocomplete="off"
-                    oninput="updateProductDetails(this)"
-                    required
+                    name="items[${productIndex}][sku]"
+                    maxlength="100"
+                    aria-label="SKU produk (opsional)"
+                    placeholder="SKU (opsional)"
                 >
-                <input
-                    type="hidden"
-                    name="items[${productIndex}][product_id]"
-                    class="catalog-product-id"
-                >
+                <div
+                    class="order-mockup-gallery"
+                    data-catalog-mockup-preview
+                    hidden
+                ></div>
+
             </td>
 
             <td>
@@ -927,6 +968,7 @@
                         list="color-options"
                         autocomplete="off"
                         placeholder="Cari warna"
+                        oninput="updateCatalogProductForColor(this)"
                     >
                     <button
                         type="button"
@@ -946,7 +988,6 @@
 
                     <option value="Stock">Stock</option>
                     <option value="Order" selected>Order</option>
-                    <option value="Mix">Mix</option>
 
                 </select>
 
@@ -955,9 +996,8 @@
             <td>
                 New
                 <input type="hidden" name="items[${productIndex}][status]" value="None">
+                <small class="order-edit-status-upload-hint">Unggah mockup setelah produk disimpan</small>
             </td>
-
-            <td><span>Unggah mockup setelah produk disimpan</span></td>
 
             <td>
 
@@ -1034,52 +1074,259 @@
             .querySelector('[name$="[category_id]"]').value = matchingCategory?.id ?? '';
     }
 
-    function updateProductDetails(input)
+    function productSuggestions()
+    {
+        const catalogSuggestions = catalogProducts.flatMap(product => {
+            const colors = (product.colors ?? []).filter(Boolean);
+
+            return (colors.length ? colors : ['']).map(color => ({
+                id: product.id,
+                name: product.name,
+                color,
+            }));
+        });
+        const catalogVariants = new Set(catalogSuggestions.map(suggestion =>
+            `${suggestion.name.toLocaleLowerCase()}\u0000${suggestion.color.toLocaleLowerCase()}`
+        ));
+
+        return [
+            ...catalogSuggestions,
+            ...productOptions
+                .filter(product => !catalogVariants.has(
+                    `${product.name.toLocaleLowerCase()}\u0000${(product.color ?? '').toLocaleLowerCase()}`
+                ))
+                .map(product => ({
+                    id: null,
+                    name: product.name,
+                    color: product.color ?? '',
+                })),
+        ];
+    }
+
+    function renderProductSuggestions(input)
+    {
+        const menu = input.closest('.product-selector').querySelector('[role="listbox"]');
+        const query = input.value.trim().toLocaleLowerCase();
+        const suggestions = productSuggestions()
+            .filter(suggestion => `${suggestion.name} ${suggestion.color}`.toLocaleLowerCase().includes(query));
+
+        menu.replaceChildren();
+        input.removeAttribute('aria-activedescendant');
+
+        if (suggestions.length === 0) {
+            menu.hidden = true;
+            input.setAttribute('aria-expanded', 'false');
+            return;
+        }
+
+        suggestions.forEach((suggestion, index) => {
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.tabIndex = -1;
+            option.id = `${menu.id}-option-${index}`;
+            option.className = 'product-suggestion-option';
+            option.setAttribute('role', 'option');
+            option.setAttribute('aria-selected', 'false');
+            option.setAttribute(
+                'aria-label',
+                `${suggestion.name}, ${suggestion.color || 'tanpa warna'}`
+            );
+
+            const name = document.createElement('span');
+            name.className = 'product-suggestion-name';
+            name.textContent = suggestion.name;
+
+            const color = document.createElement('small');
+            color.className = 'product-suggestion-color';
+            color.textContent = suggestion.color || 'Tanpa warna';
+
+            option.append(name, color);
+            option.addEventListener('pointerdown', event => event.preventDefault());
+            option.addEventListener('click', () => {
+                input.value = suggestion.name;
+                updateProductDetails(input, suggestion.id ?? '', suggestion.color);
+
+                closeProductSuggestions(input);
+                input.focus();
+            });
+            menu.appendChild(option);
+        });
+
+        menu.hidden = false;
+        input.setAttribute('aria-expanded', 'true');
+        positionProductSuggestions(input);
+    }
+
+    function positionProductSuggestions(input)
+    {
+        const menu = input.closest('.product-selector').querySelector('[role="listbox"]');
+        if (menu.hidden) {
+            return;
+        }
+
+        const inputBounds = input.getBoundingClientRect();
+        const menuWidth = Math.min(Math.max(inputBounds.width, 240), window.innerWidth - 16);
+        menu.style.width = `${menuWidth}px`;
+        menu.style.left = `${Math.max(8, Math.min(inputBounds.left, window.innerWidth - menuWidth - 8))}px`;
+
+        const menuHeight = menu.getBoundingClientRect().height;
+        const spaceBelow = window.innerHeight - inputBounds.bottom;
+        const top = spaceBelow >= menuHeight + 8
+            ? inputBounds.bottom + 4
+            : inputBounds.top >= menuHeight + 8
+            ? inputBounds.top - menuHeight - 4
+            : 8;
+        menu.style.top = `${Math.max(8, top)}px`;
+    }
+
+    function showProductSuggestions(input)
+    {
+        renderProductSuggestions(input);
+    }
+
+    function handleProductInput(input)
+    {
+        updateProductDetails(input);
+        renderProductSuggestions(input);
+    }
+
+    function handleProductSuggestionKeydown(event, input)
+    {
+        const menu = input.closest('.product-selector').querySelector('[role="listbox"]');
+
+        if (event.key === 'Escape') {
+            closeProductSuggestions(input);
+            return;
+        }
+
+        if (event.key === 'Enter' && ! menu.hidden) {
+            const activeOption = menu.querySelector('[aria-selected="true"]')
+                ?? menu.querySelector('[role="option"]');
+            if (activeOption) {
+                event.preventDefault();
+                activeOption.click();
+            }
+
+            return;
+        }
+
+        if (! ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+            return;
+        }
+
+        event.preventDefault();
+        if (menu.hidden) {
+            renderProductSuggestions(input);
+        }
+
+        const options = [...menu.querySelectorAll('[role="option"]')];
+        if (options.length === 0) {
+            return;
+        }
+
+        const activeIndex = options.findIndex(option => option.getAttribute('aria-selected') === 'true');
+        const nextIndex = event.key === 'ArrowDown'
+            ? (activeIndex + 1) % options.length
+            : (activeIndex <= 0 ? options.length - 1 : activeIndex - 1);
+        options.forEach((option, index) => option.setAttribute('aria-selected', String(index === nextIndex)));
+        input.setAttribute('aria-activedescendant', options[nextIndex].id);
+        options[nextIndex].scrollIntoView({ block: 'nearest' });
+    }
+
+    function closeProductSuggestions(input)
+    {
+        const menu = input.closest('.product-selector').querySelector('[role="listbox"]');
+        menu.hidden = true;
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-activedescendant');
+    }
+
+    function repositionOpenProductSuggestions()
+    {
+        document.querySelectorAll('.product-selector input[aria-expanded="true"]')
+            .forEach(positionProductSuggestions);
+    }
+
+    function setCatalogMockupPreview(row, product)
+    {
+        const preview = row.querySelector('[data-catalog-mockup-preview]');
+        if (!preview) {
+            return;
+        }
+
+        preview.replaceChildren();
+
+        (product?.mockup_urls ?? []).forEach(mockupUrl => {
+            const image = document.createElement('img');
+            image.className = 'product-catalog-photo';
+            image.src = mockupUrl;
+            image.alt = `Mockup ${product.name}`;
+            preview.appendChild(image);
+        });
+
+        preview.hidden = (product?.mockup_urls ?? []).length === 0;
+    }
+
+    function updateProductDetails(input, selectedCatalogProductId = null, selectedColor = null)
     {
         const row = input.closest('tr');
         const categoryInput = row.querySelector('.category-search');
         const categoryIdInput = row.querySelector('[name$="[category_id]"]');
         const productIdInput = row.querySelector('[name$="[product_id]"]');
+        const skuInput = row.querySelector('[name$="[sku]"]');
         const dimensionsInput = row.querySelector('[name$="[dimensions]"]');
         const priceInput = row.querySelector('[name$="[price]"]');
         const colorInput = row.querySelector('[name$="[color]"]');
         const previouslySelectedCatalogId = productIdInput.value;
         const matchingCatalogProduct = catalogProducts.find(product =>
+            selectedCatalogProductId === ''
+                ? false
+                : selectedCatalogProductId !== null
+                ? String(product.id) === String(selectedCatalogProductId)
+                : product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
+        );
+        const requestedColor = (selectedColor ?? colorInput.value).trim().toLocaleLowerCase();
+        const matchingProduct = productOptions.find(product =>
+            product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
+            && (! requestedColor || (product.color ?? '').toLocaleLowerCase() === requestedColor)
+        ) ?? productOptions.find(product =>
             product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
         );
         const previouslyAutofilledProduct = categoryInput.dataset.autofilledProduct;
 
         if (matchingCatalogProduct) {
+            setCatalogMockupPreview(row, matchingCatalogProduct);
             productIdInput.value = matchingCatalogProduct.id;
+            skuInput.value = matchingCatalogProduct.sku ?? '';
             categoryInput.value = matchingCatalogProduct.category_name ?? '';
             categoryInput.dataset.autofilledProduct = matchingCatalogProduct.name;
             categoryIdInput.value = matchingCatalogProduct.category_id ?? '';
-            dimensionsInput.value = matchingCatalogProduct.dimensions ?? '';
+            dimensionsInput.value = matchingCatalogProduct.dimensions || matchingProduct?.dimensions || '';
             priceInput.value = matchingCatalogProduct.price ?? '';
             formatPriceInput(priceInput, true);
-            colorInput.value = matchingCatalogProduct.colors.length === 1
-                ? matchingCatalogProduct.colors[0]
-                : '';
+            colorInput.value = selectedColor
+                ?? (matchingCatalogProduct.colors.length === 1 ? matchingCatalogProduct.colors[0] : '');
         } else {
+            setCatalogMockupPreview(row, null);
             productIdInput.value = '';
             if (previouslySelectedCatalogId !== '') {
                 categoryInput.value = '';
                 categoryIdInput.value = '';
+                skuInput.value = '';
                 dimensionsInput.value = '';
                 priceInput.value = '';
                 colorInput.value = '';
                 delete categoryInput.dataset.autofilledProduct;
             }
 
-            const matchingProduct = productOptions.find(product =>
-                product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
-            );
             if (matchingProduct) {
+                skuInput.value = matchingProduct.sku ?? '';
                 categoryInput.value = matchingProduct.category_name ?? '';
                 categoryInput.dataset.autofilledProduct = matchingProduct.name;
                 categoryIdInput.value = matchingProduct.category_id ?? '';
                 dimensionsInput.value = matchingProduct.dimensions ?? '';
             } else if (previouslyAutofilledProduct) {
+                skuInput.value = '';
                 categoryInput.value = '';
                 categoryIdInput.value = '';
                 dimensionsInput.value = '';
@@ -1088,6 +1335,46 @@
         }
 
         calculateTotal();
+    }
+
+    function updateCatalogProductForColor(input)
+    {
+        const row = input.closest('tr');
+        const productInput = row.querySelector('[name$="[product]"]');
+        const productIdInput = row.querySelector('[name$="[product_id]"]');
+        const dimensionsInput = row.querySelector('[name$="[dimensions]"]');
+        const productName = productInput.value.trim().toLocaleLowerCase();
+        const color = input.value.trim();
+        const selectedProduct = catalogProducts.find(product =>
+            String(product.id) === String(productIdInput.value)
+            && product.name.toLocaleLowerCase() === productName
+        );
+        const fallbackDimensions = dimensionsInput.value.trim() || selectedProduct?.dimensions || '';
+
+        if (!productName || !color) {
+            return;
+        }
+
+        const matchingVariant = catalogProducts.find(product =>
+            product.name.toLocaleLowerCase() === productName
+            && product.colors.some(productColor =>
+                productColor.toLocaleLowerCase() === color.toLocaleLowerCase()
+            )
+        );
+
+        if (matchingVariant) {
+            updateProductDetails(productInput, matchingVariant.id);
+            if (!matchingVariant.dimensions) {
+                dimensionsInput.value = fallbackDimensions;
+            }
+            input.value = color;
+            return;
+        }
+
+        if (selectedProduct) {
+            productIdInput.value = '';
+            setCatalogMockupPreview(row, null);
+        }
     }
 
     function setGuestSource(source)
@@ -1133,7 +1420,11 @@
 
         guestWrapper.querySelector('[name="guest_id"]').value = matchingGuest?.id ?? '';
         guestWrapper.querySelector('[name="guest_name"]').value = matchingGuest?.name ?? input.value.trim();
-        input.closest('.row').querySelector('[name="guest_address"]').value = matchingGuest?.address ?? '';
+        const addressInput = input.closest('form').querySelector('[name="guest_address"]');
+        addressInput.value = matchingGuest?.address ?? '';
+        if (matchingGuest?.address) {
+            addressInput.closest('details').open = true;
+        }
         setGuestSource(matchingGuest?.guest_source ?? '');
 
         const phoneInput = input.closest('.row').querySelector('[name="phone"]');
@@ -1209,7 +1500,11 @@
                 activeGuestInput.value = guest.name;
                 activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_id"]').value = guest.id;
                 activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_name"]').value = guest.name;
-                activeGuestInput.closest('.row').querySelector('[name="guest_address"]').value = guest.address ?? '';
+                const addressInput = activeGuestInput.closest('form').querySelector('[name="guest_address"]');
+                addressInput.value = guest.address ?? '';
+                if (guest.address) {
+                    addressInput.closest('details').open = true;
+                }
             }
 
             setGuestSource('');
@@ -1372,6 +1667,9 @@
 
     productIndex = document.querySelectorAll('#product-container tr').length;
     calculateTotal();
+
+    window.addEventListener('scroll', repositionOpenProductSuggestions, true);
+    window.addEventListener('resize', repositionOpenProductSuggestions);
 
 </script>
 
