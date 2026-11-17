@@ -1,16 +1,18 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Add Category</title>
-</head>
+@extends('layouts.admin')
 
-<body style="font-family:Arial;margin:40px;">
+@section('title', 'Tambah Kategori')
 
-<h1>Add Category</h1>
+@section('content')
+<div class="page-heading">
+    <div>
+        <p class="page-eyebrow">Master data</p>
+        <h1>Tambah Kategori</h1>
+        <p>Buat kategori baru untuk pengelompokan produk.</p>
+    </div>
+</div>
 
 @if($errors->any())
-    <div style="color:red;">
+    <div class="field-error">
         <ul>
             @foreach($errors->all() as $error)
                 <li>{{ $error }}</li>
@@ -20,39 +22,30 @@
 @endif
 
 <form
+    class="card compact-form"
     action="{{ route('categories.store') }}"
     method="POST"
 >
 
     @csrf
 
-    <div style="margin-bottom:15px;">
+    <div>
 
-        <label>
-            Category Name
-        </label>
-
-        <br>
+        <label for="name">Nama Kategori</label>
 
         <input
+            id="name"
             type="text"
             name="name"
             value="{{ old('name') }}"
             required
-            style="padding:10px;width:300px;"
         >
 
     </div>
 
-    <button type="submit">
-        Save Category
-    </button>
+    <button class="btn-primary" type="submit">Simpan Kategori</button>
 
-    <a href="{{ route('categories.index') }}">
-        Cancel
-    </a>
+    <a class="btn" href="{{ route('categories.index') }}">Batal</a>
 
 </form>
-
-</body>
-</html>
+@endsection

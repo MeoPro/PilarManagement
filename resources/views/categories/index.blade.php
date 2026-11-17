@@ -1,55 +1,16 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Categories</title>
+@extends('layouts.admin')
 
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 40px;
-        }
+@section('title', 'Kategori Produk')
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th, td {
-            padding: 12px;
-            border: 1px solid #ddd;
-            text-align: left;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 8px 14px;
-            text-decoration: none;
-            border-radius: 5px;
-            border: none;
-            cursor: pointer;
-        }
-
-        .btn-primary {
-            background: #222;
-            color: white;
-        }
-
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-
-        .btn-warning {
-            background: #ffc107;
-            color: #000;
-        }
-    </style>
-</head>
-
-<body>
-
-<h1>Categories</h1>
+@section('content')
+<div class="page-heading">
+    <div>
+        <p class="page-eyebrow">Master data</p>
+        <h1>Kategori Produk</h1>
+        <p>Atur kategori yang digunakan pada detail produk pesanan. Daftar diurutkan A-Z.</p>
+    </div>
+    <a href="{{ route('categories.create') }}" class="btn btn-primary">+ Tambah Kategori</a>
+</div>
 
 @if(session('success'))
     <div style="margin-bottom:20px;color:green;">
@@ -57,19 +18,14 @@
     </div>
 @endif
 
-<a href="{{ route('categories.create') }}" class="btn btn-primary">
-    + Add Category
-</a>
-
-<br><br>
-
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
             <th>#</th>
-            <th>Category</th>
-            <th>Created</th>
-            <th width="180">Action</th>
+            <th>            Kategori</th>
+            <th>            Dibuat</th>
+            <th width="180">            Aksi</th>
         </tr>
     </thead>
 
@@ -94,7 +50,7 @@
                     href="{{ route('categories.edit', $category) }}"
                     class="btn btn-warning"
                 >
-                    Edit
+                    Ubah
                 </a>
 
                 <form
@@ -107,10 +63,12 @@
 
                     <button
                         type="submit"
-                        class="btn btn-danger"
+                        class="btn btn-danger icon-button"
+                        aria-label="Hapus kategori"
+                        title="Hapus kategori"
                         onclick="return confirm('Hapus category ini?')"
                     >
-                        Delete
+                        <x-layout.icon name="trash" />
                     </button>
                 </form>
 
@@ -121,7 +79,7 @@
 
         <tr>
             <td colspan="4">
-                Belum ada category.
+                Belum ada kategori.
             </td>
         </tr>
 
@@ -129,6 +87,5 @@
 
     </tbody>
 </table>
-
-</body>
-</html>
+</div>
+@endsection

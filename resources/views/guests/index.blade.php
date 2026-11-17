@@ -1,95 +1,37 @@
-<!DOCTYPE html>
-<html lang="id">
+@extends('layouts.admin')
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Daftar Tamu</title>
+@section('title', 'Daftar Tamu')
 
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 30px;
-            color: #222;
-        }
-
-        .actions {
-            display: flex;
-            gap: 8px;
-            margin: 20px 0;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 8px 12px;
-            border: 0;
-            border-radius: 5px;
-            background: #222;
-            color: white;
-            cursor: pointer;
-            text-decoration: none;
-        }
-
-        .search-form {
-            display: flex;
-            gap: 8px;
-            max-width: 860px;
-            margin: 24px 0;
-        }
-
-        .search-form input,
-        .search-form select {
-            flex: 1;
-            min-width: 0;
-            padding: 9px 11px;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 10px;
-            border: 1px solid #ddd;
-            text-align: left;
-        }
-
-        th {
-            background: #f5f5f5;
-        }
-
-        @media (max-width: 700px) {
-            body {
-                margin: 16px;
-            }
-
-            .table-wrapper {
-                overflow-x: auto;
-            }
-
-            table {
-                min-width: 650px;
-            }
-        }
-    </style>
-</head>
-
-<body>
-    <h1>Daftar Tamu</h1>
+@section('content')
+    <div class="page-heading">
+        <div>
+            <p class="page-eyebrow">Pelanggan</p>
+            <h1>Daftar Tamu</h1>
+            <p>Data pelanggan dan ringkasan riwayat pembelian.</p>
+        </div>
+    </div>
 
     <div class="actions">
-        <a href="{{ route('orders.index') }}" class="btn">Kembali ke Order</a>
-        <a href="{{ route('orders.create') }}" class="btn">+ Create Order</a>
+        @if(auth()->user()->canAccessMenu('orders'))
+            <a href="{{ route('orders.index') }}" class="btn">Kembali ke Order</a>
+            <a href="{{ route('orders.create') }}" class="btn">+ Create Order</a>
+        @endif
+        @if(auth()->user()->canAccessMenu('popular_categories'))
+            <a href="{{ route('reports.popular-categories') }}" class="btn">Kategori Terlaris</a>
+        @endif
     </div>
+
+    <section class="guest-debt-summary">
+        <span>Total hutang dari order yang selesai</span>
+        <strong>Rp {{ number_format((float) $totalGuestDebt, 0, ',', '.') }}</strong>
+    </section>
 
     <form action="{{ route('guests.index') }}" method="GET" class="search-form">
         <input
             type="search"
             name="search"
             value="{{ $search }}"
-            placeholder="Cari nama tamu, telepon, atau Order ID"
+            placeholder="Cari nama tamu, telepon, atau SPK"
             aria-label="Cari tamu"
         >
         <select name="sort" aria-label="Urutkan tamu">
@@ -111,17 +53,22 @@
                 <tr>
                     <th>ID Tamu</th>
                     <th>Tamu</th>
+                    <th>Alamat</th>
                     <th>No. Telp</th>
-                    <th>Order ID</th>
+                    <th>SPK</th>
                     <th>Jumlah Order</th>
-                    <th>Total Order</th>
+                    <th>Total Belanja</th>
+                    <th>Hutang</th>
+                    <th>Sisa Pembayaran</th>
+                    <th class="text-right">Actions</th>
                 </tr>
             </thead>
             <tbody>
                 @forelse($guests as $guest)
                     <tr>
                         <td>{{ $guest->id }}</td>
-                        <td>{{ $guest->name }}</td>
+                        <td><a href="{{ route('guests.show', $guest) }}">{{ $guest->name }}</a></td>
+                        <td>{{ $guest->address ?? '-' }}</td>
                         <td>
                             @forelse($guest->phones as $guestPhone)
                                 {{ $guestPhone->phone }}@if(!$loop->last), @endif
@@ -131,15 +78,44 @@
                         </td>
                         <td>
                             @foreach($guest->orders as $order)
-                                <a href="{{ route('orders.show', $order) }}">{{ $order->order_id }}</a>@if(!$loop->last), @endif
+                                @if(auth()->user()->canAccessMenu('orders'))
+                                    <a href="{{ route('orders.show', $order) }}">{{ $order->order_id }}</a>
+                                @else
+                                    {{ $order->order_id }}
+                                @endif
+                                @if(!$loop->last), @endif
                             @endforeach
                         </td>
                         <td>{{ $guest->orders_count }}</td>
-                        <td>Rp {{ number_format($guest->orders_sum_total_order ?? 0, 0, ',', '.') }}</td>
+                        <td><a href="{{ route('guests.show', $guest) }}">Rp {{ number_format($guest->orders_sum_total_order ?? 0, 0, ',', '.') }}</a></td>
+                        <td>
+                            @if((float) $guest->debt_amount > 0)
+                                <strong class="guest-debt-amount">Rp {{ number_format((float) $guest->debt_amount, 0, ',', '.') }}</strong>
+                            @else
+                                Rp 0
+                            @endif
+                        </td>
+                        <td>
+                            @if((float) $guest->unpaid_amount > 0)
+                                <strong class="guest-debt-amount">Rp {{ number_format((float) $guest->unpaid_amount, 0, ',', '.') }}</strong>
+                            @else
+                                Rp 0
+                            @endif
+                        </td>
+                        <td>
+                            <div class="order-row-actions">
+                                <a href="{{ route('guests.show', $guest) }}" class="icon-button" aria-label="Lihat tamu" title="Lihat tamu">
+                                    <x-layout.icon name="eye" />
+                                </a>
+                                <a href="{{ route('guests.edit', $guest) }}" class="icon-button" aria-label="Edit tamu" title="Edit tamu">
+                                    <x-layout.icon name="pencil" />
+                                </a>
+                            </div>
+                        </td>
                     </tr>
                 @empty
                     <tr>
-                        <td colspan="6">Belum ada data tamu.</td>
+                        <td colspan="10">Belum ada data tamu.</td>
                     </tr>
                 @endforelse
             </tbody>
@@ -147,6 +123,4 @@
     </div>
 
     {{ $guests->links() }}
-</body>
-
-</html>
+@endsection

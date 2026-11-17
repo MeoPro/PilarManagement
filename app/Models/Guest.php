@@ -9,6 +9,8 @@ class Guest extends Model
 {
     protected $fillable = [
         'name',
+        'guest_source',
+        'address',
     ];
 
     public function phones(): HasMany

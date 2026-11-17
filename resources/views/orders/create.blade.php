@@ -1,197 +1,46 @@
-<!DOCTYPE html>
-<html lang="id">
+@extends('layouts.admin')
 
-<head>
+@section('title', 'Buat Order')
 
-    <meta charset="UTF-8">
-
-    <title>Create Order</title>
-
-    <style>
-
-        body {
-            font-family: Arial, sans-serif;
-            margin: 30px;
-            background: #f5f5f5;
-        }
-
-        .container {
-            max-width: 1300px;
-            margin: auto;
-        }
-
-        .card {
-            background: white;
-            padding: 25px;
-            margin-bottom: 20px;
-            border-radius: 8px;
-        }
-
-        input,
-        select,
-        textarea {
-            padding: 9px;
-            width: 100%;
-            box-sizing: border-box;
-        }
-
-        .price-input {
-            text-align: right;
-            font-variant-numeric: tabular-nums;
-        }
-
-        .date-input {
-            min-height: 42px;
-            border: 1px solid #cbd5d1;
-            border-radius: 5px;
-            background: #fff;
-            color: #17211d;
-            font: inherit;
-            font-variant-numeric: tabular-nums;
-            accent-color: #176b52;
-            cursor: pointer;
-        }
-
-        .date-input:focus {
-            outline: 2px solid #176b52;
-            outline-offset: 1px;
-            border-color: #176b52;
-        }
-
-        .date-input::-webkit-calendar-picker-indicator {
-            padding: 4px;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
-        .date-input::-webkit-calendar-picker-indicator:hover {
-            background: #e8f2ee;
-        }
-
-        label {
-            font-weight: bold;
-            display: block;
-            margin-bottom: 5px;
-        }
-
-        .form-group {
-            margin-bottom: 15px;
-        }
-
-        .row {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 8px;
-            border: 1px solid #ddd;
-        }
-
-        .btn {
-            padding: 9px 14px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-block;
-        }
-
-        .btn-primary {
-            background: #222;
-            color: white;
-        }
-
-        .btn-success {
-            background: #198754;
-            color: white;
-        }
-
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-
-        .btn-secondary {
-            background: #6c757d;
-            color: white;
-        }
-
-        .category-wrapper {
-            display: flex;
-            gap: 5px;
-        }
-
-        .guest-wrapper {
-            display: flex;
-            gap: 5px;
-        }
-
-        .guest-wrapper input {
-            flex: 1;
-            min-width: 0;
-        }
-
-        .category-wrapper select {
-            flex: 1;
-        }
-
-        .modal {
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0,0,0,.5);
-            justify-content: center;
-            align-items: center;
-            z-index: 9999;
-        }
-
-        .modal-content {
-            background: white;
-            padding: 25px;
-            width: 400px;
-            border-radius: 8px;
-        }
-
-    </style>
-
-</head>
-
-<body>
+@section('content')
+@php($guestSourceOptions = ['Gmaps', 'Instagram', 'Website', 'Lokal'])
+@php($currentGuestSource = old('guest_source', ''))
+@php($isCustomGuestSource = $currentGuestSource === '__custom' || ($currentGuestSource !== '' && ! in_array($currentGuestSource, $guestSourceOptions, true)))
+@php($customGuestSource = old('guest_source_custom', $isCustomGuestSource && $currentGuestSource !== '__custom' ? $currentGuestSource : ''))
 
 <div class="container">
 
-    <h1>Create Order</h1>
-
-    @if($errors->any())
-
-        <div style="color:red;">
-
-            <ul>
-                @foreach($errors->all() as $error)
-
-                    <li>{{ $error }}</li>
-
-                @endforeach
-
-            </ul>
-
+    <div class="page-heading">
+        <div>
+            <p class="page-eyebrow">Penjualan</p>
+            <h1>Buat Order</h1>
+            <p>Lengkapi informasi pelanggan dan produk pesanan.</p>
         </div>
+    </div>
 
-    @endif
+    <div
+        id="order-form-errors"
+        class="field-error"
+        role="alert"
+        aria-live="assertive"
+        @if(!$errors->any()) hidden @endif
+    >
+        <ul>
+            @foreach($errors->all() as $error)
+                <li>{{ $error }}</li>
+            @endforeach
+        </ul>
+    </div>
 
 
     <form
+        class="order-create-form"
         action="{{ route('orders.store') }}"
         method="POST"
         enctype="multipart/form-data"
+        data-ajax-validation
+        data-validation-errors="order-form-errors"
+        data-check-order-id-url="{{ route('orders.check-id') }}"
     >
 
         @csrf
@@ -201,15 +50,15 @@
         {{-- ORDER INFORMATION --}}
         {{-- ========================= --}}
 
-        <div class="card">
+        <div class="card order-form-section">
 
-            <h2>Order Information</h2>
+            <h2>Informasi Order</h2>
 
-            <div class="row">
+            <div class="row order-form-grid">
 
                 <div class="form-group">
 
-                    <label>Order ID</label>
+                    <label>SPK</label>
 
                     <input
                         type="text"
@@ -218,13 +67,6 @@
                         aria-describedby="order-id-error"
                         required
                     >
-
-                    <div
-                        id="order-id-error"
-                        role="alert"
-                        aria-live="polite"
-                        style="color:red;"
-                    ></div>
 
                 </div>
 
@@ -239,7 +81,7 @@
                             name="guest_picker"
                             list="guest-options"
                             value="{{ old('guest_name') }}"
-                            placeholder="Cari atau pilih tamu"
+                            placeholder="Pilih tamu atau ketik nama baru"
                             autocomplete="off"
                             oninput="updateGuestPhone(this)"
                             required
@@ -250,28 +92,57 @@
                             name="guest_name"
                             value="{{ old('guest_name') }}"
                         >
-                        <button
-                            type="button"
-                            class="btn btn-success"
-                            onclick="openGuestModal(this)"
-                            aria-label="Tambah tamu"
-                        >
-                            +
-                        </button>
+                        @if(auth()->user()->canAccessMenu('guests'))
+                            <button
+                                type="button"
+                                class="btn btn-success"
+                                onclick="openGuestModal(this)"
+                                aria-label="Tambah tamu"
+                            >
+                                +
+                            </button>
+                        @endif
                     </div>
+                    <small>Pilih tamu dari daftar atau ketik nama baru untuk mendaftarkannya.</small>
 
                 </div>
 
 
                 <div class="form-group">
 
-                    <label>Sumber Tamu</label>
-
-                    <select name="guest_source" required>
-                        <option value="">-- Pilih Sumber Tamu --</option>
-                        @foreach(['Lokal', 'Online', 'Touris'] as $guestSource)
-                            <option value="{{ $guestSource }}" @selected(old('guest_source') === $guestSource)>
+                    <label for="guest-source-select">Sumber Tamu</label>
+                    <select id="guest-source-select" name="guest_source" onchange="updateGuestSource()" required>
+                        <option value="">-- Pilih sumber --</option>
+                        @foreach($guestSourceOptions as $guestSource)
+                            <option value="{{ $guestSource }}" @selected($currentGuestSource === $guestSource)>
                                 {{ $guestSource }}
+                            </option>
+                        @endforeach
+                        <option value="__custom" @selected($isCustomGuestSource)>Lainnya</option>
+                    </select>
+                    <input
+                        id="guest-source-custom"
+                        type="text"
+                        name="guest_source_custom"
+                        value="{{ $customGuestSource }}"
+                        maxlength="255"
+                        placeholder="Masukkan sumber tamu"
+                        @if(!$isCustomGuestSource) disabled hidden @endif
+                        @if($isCustomGuestSource) required @endif
+                    >
+                    <small>Pilih sumber yang tersedia atau pilih Lainnya untuk menambahkan sumber baru.</small>
+
+                </div>
+
+                <div class="form-group">
+
+                    <label for="order-type">Lokasi Tujuan</label>
+
+                    <select id="order-type" name="order_type" required>
+                        <option value="">-- Pilih Lokasi Tujuan --</option>
+                        @foreach(['Bali', 'Luar Bali', 'Ekspor'] as $orderType)
+                            <option value="{{ $orderType }}" @selected(old('order_type') === $orderType)>
+                                {{ $orderType }}
                             </option>
                         @endforeach
                     </select>
@@ -292,43 +163,54 @@
 
                 </div>
 
-
-                <div class="form-group">
-
-                    <label>Deadline</label>
-
+                <div
+                    class="form-group order-form-deadline-control"
+                    data-deadline-control
+                    data-deadline-today="{{ today()->toDateString() }}"
+                >
+                    <label for="deadline-date">Deadline tanggal</label>
                     <input
+                        id="deadline-date"
                         type="date"
                         class="date-input"
                         name="deadline"
                         value="{{ old('deadline') }}"
+                        data-deadline-date
                     >
-
+                    <label for="deadline-days">Atau dalam hari</label>
+                    <input
+                        id="deadline-days"
+                        type="number"
+                        min="0"
+                        step="1"
+                        data-deadline-days
+                        aria-label="Jumlah hari sampai deadline"
+                    >
+                    <small>Ubah hari atau tanggal untuk menyesuaikan deadline.</small>
                 </div>
-
 
                 <div class="form-group">
-
                     <label>Status Order</label>
-
-                    <input type="hidden" name="status" value="None">
-                    <div>None</div>
-
+                    <span class="order-form-status">New</span>
                 </div>
-
             </div>
 
-
-            <div class="form-group">
-
-                <label>Note</label>
-
-                <textarea
-                    name="note"
-                    rows="4"
-                >{{ old('note') }}</textarea>
-
-            </div>
+            <details
+                class="order-form-optional-fields"
+                @if(old('guest_address') || old('note') || $errors->has('guest_address') || $errors->has('note')) open @endif
+            >
+                <summary>Alamat dan catatan tambahan</summary>
+                <div class="order-form-optional-grid">
+                    <div class="form-group">
+                        <label for="guest-address">Alamat Tamu (opsional)</label>
+                        <textarea id="guest-address" name="guest_address" rows="2">{{ old('guest_address') }}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="order-note">Catatan Order (opsional)</label>
+                        <textarea id="order-note" name="note" rows="2">{{ old('note') }}</textarea>
+                    </div>
+                </div>
+            </details>
 
         </div>
 
@@ -337,9 +219,9 @@
         {{-- PRODUCTS --}}
         {{-- ========================= --}}
 
-        <div class="card">
+        <div class="card order-form-section">
 
-            <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="order-form-product-heading">
 
                 <h2>List Produk</h2>
 
@@ -354,70 +236,56 @@
             </div>
 
 
-            <table>
-
-                <thead>
-
-                    <tr>
-
-                        <th>Produk</th>
-
-                        <th>Category</th>
-
-                        <th>Qty</th>
-
-                        <th>Harga</th>
-
-                        <th>Warna</th>
-
-                        <th>Sumber</th>
-
-                        <th>Status</th>
-
-                        <th>Gambar</th>
-
-                        <th>Action</th>
-
-                    </tr>
-
-                </thead>
+            <div class="table-wrapper order-form-products-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Produk</th>
+                            <th>Kategori</th>
+                            <th>Ukuran (P x L x T)</th>
+                            <th>Qty</th>
+                            <th>Harga</th>
+                            <th>Warna</th>
+                            <th>Sumber</th>
+                            <th>Status</th>
+                            <th>Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="product-container"></tbody>
+                </table>
+            </div>
 
 
-                <tbody id="product-container">
-
-                    {{-- Product row generated by JS --}}
-
-                </tbody>
-
-            </table>
-
-
-            <div style="text-align:right;margin-top:20px;">
-
-                <h2>
+            <div class="order-form-product-total">
+                <strong>
                     Total:
                     Rp <span id="total-display">0</span>
-                </h2>
+                </strong>
+            </div>
 
+            <div class="form-group order-payment-field order-form-payment-field">
+                <label for="paid_amount">Total pembayaran / DP yang sudah diterima (Rp)</label>
+                <input
+                    id="paid_amount"
+                    type="text"
+                    inputmode="decimal"
+                    class="price-input"
+                    data-money-input
+                    name="paid_amount"
+                    value="{{ old('paid_amount', '0') }}"
+                    autocomplete="off"
+                    oninput="formatPriceInput(this)"
+                >
+                <small>Persentase DP dan sisa pembayaran dihitung dari total order.</small>
             </div>
 
         </div>
 
 
-        <button
-            type="submit"
-            class="btn btn-primary"
-        >
-            Save Order
-        </button>
-
-
-        <a
-            href="{{ route('orders.index') }}"
-            class="btn btn-secondary"
-        >
-            Cancel
-        </a>
+        <div class="order-form-actions">
+            <button type="submit" class="btn btn-primary">Simpan Order</button>
+            <a href="{{ route('orders.index') }}" class="btn btn-secondary">Batal</a>
+        </div>
 
     </form>
 
@@ -427,6 +295,17 @@
 <datalist id="guest-options">
     @foreach($guests as $guest)
         <option value="{{ $guest->name }}"></option>
+    @endforeach
+</datalist>
+
+<datalist id="product-options">
+    @foreach($catalogProducts as $catalogProduct)
+        <option value="{{ $catalogProduct['name'] }}"></option>
+    @endforeach
+    @foreach($productOptions as $productOption)
+        @unless(collect($catalogProducts)->contains(fn ($catalogProduct) => mb_strtolower($catalogProduct['name']) === mb_strtolower($productOption['name'])))
+            <option value="{{ $productOption['name'] }}"></option>
+        @endunless
     @endforeach
 </datalist>
 
@@ -578,6 +457,8 @@
 
 
     const categories = @json($categories);
+    const productOptions = @json($productOptions);
+    const catalogProducts = @json($catalogProducts);
     const guests = @json($guests);
     const oldItems = @json(is_array(old('items')) ? old('items') : []);
 
@@ -649,7 +530,15 @@
                 <input
                     type="text"
                     name="items[${productIndex}][product]"
+                    list="product-options"
+                    autocomplete="off"
+                    oninput="updateProductDetails(this)"
                     required
+                >
+                <input
+                    type="hidden"
+                    name="items[${productIndex}][product_id]"
+                    class="catalog-product-id"
                 >
 
             </td>
@@ -664,7 +553,7 @@
                         class="category-search"
                         list="category-options"
                         autocomplete="off"
-                        placeholder="Cari kategori"
+                        placeholder="Ketik kategori"
                         oninput="updateCategoryId(this)"
                     >
 
@@ -674,16 +563,30 @@
                     >
 
 
-                    <button
-                        type="button"
-                        class="btn btn-success"
-                        onclick="openCategoryModal(this)"
-                    >
-                        +
-                    </button>
+                    @if(auth()->user()->canAccessMenu('categories'))
+                        <button
+                            type="button"
+                            class="btn btn-success"
+                            onclick="openCategoryModal(this)"
+                        >
+                            +
+                        </button>
+                    @endif
 
                 </div>
 
+            </td>
+
+
+            <td>
+                <input
+                    type="text"
+                    name="items[${productIndex}][dimensions]"
+                    data-furniture-dimensions
+                    placeholder="Contoh: 10 10 10"
+                    maxlength="100"
+                    required
+                >
             </td>
 
 
@@ -709,6 +612,7 @@
                     class="price-input"
                     name="items[${productIndex}][price]"
                     required
+                    data-money-input
                     oninput="formatPriceInput(this); calculateTotal()"
                 >
 
@@ -769,53 +673,19 @@
             </td>
 
 
-            <td>
-
-                <select
-                    name="items[${productIndex}][status]"
-                    required
-                >
-
-                    <option value="None">
-                        None
-                    </option>
-
-                    <option value="Produksi">
-                        Produksi
-                    </option>
-
-                    <option value="Distribusi">
-                        Distribusi
-                    </option>
-
-                    <option value="Ready">
-                        Ready
-                    </option>
-
-                </select>
-
-            </td>
-
-
-            <td>
-
-                <input
-                    type="file"
-                    name="items[${productIndex}][image]"
-                    accept="image/*"
-                >
-
-            </td>
+            <td><span>New</span></td>
 
 
             <td>
 
                 <button
                     type="button"
-                    class="btn btn-danger"
+                    class="btn btn-danger icon-button"
+                    aria-label="Hapus produk"
+                    title="Hapus produk"
                     onclick="removeProduct(this)"
                 >
-                    X
+                    <x-layout.icon name="trash" />
                 </button>
 
             </td>
@@ -827,14 +697,15 @@
 
         if (oldItem) {
             row.querySelector('[name$="[product]"]').value = oldItem.product ?? '';
+            row.querySelector('[name$="[product_id]"]').value = oldItem.product_id ?? '';
             row.querySelector('[name$="[category_id]"]').value = oldItem.category_id ?? '';
+            row.querySelector('[name$="[dimensions]"]').value = oldItem.dimensions ?? '';
             const oldCategory = categories.find(category => String(category.id) === String(oldItem.category_id));
             row.querySelector('.category-search').value = oldCategory?.name ?? '';
             row.querySelector('[name$="[qty]"]').value = oldItem.qty ?? '';
             row.querySelector('[name$="[price]"]').value = oldItem.price ?? '';
             row.querySelector('[name$="[color]"]').value = oldItem.color ?? '';
             row.querySelector('[name$="[source]"]').value = oldItem.source ?? 'Order';
-            row.querySelector('[name$="[status]"]').value = oldItem.status ?? 'None';
         }
 
         formatPriceInput(row.querySelector('[name$="[price]"]'), true);
@@ -894,6 +765,96 @@
             .querySelector('[name$="[category_id]"]').value = matchingCategory?.id ?? '';
     }
 
+    function updateProductDetails(input)
+    {
+        const row = input.closest('tr');
+        const categoryInput = row.querySelector('.category-search');
+        const categoryIdInput = row.querySelector('[name$="[category_id]"]');
+        const productIdInput = row.querySelector('[name$="[product_id]"]');
+        const dimensionsInput = row.querySelector('[name$="[dimensions]"]');
+        const priceInput = row.querySelector('[name$="[price]"]');
+        const colorInput = row.querySelector('[name$="[color]"]');
+        const previouslySelectedCatalogId = productIdInput.value;
+        const matchingCatalogProduct = catalogProducts.find(product =>
+            product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
+        );
+        const previouslyAutofilledProduct = categoryInput.dataset.autofilledProduct;
+
+        if (matchingCatalogProduct) {
+            productIdInput.value = matchingCatalogProduct.id;
+            categoryInput.value = matchingCatalogProduct.category_name ?? '';
+            categoryInput.dataset.autofilledProduct = matchingCatalogProduct.name;
+            categoryIdInput.value = matchingCatalogProduct.category_id ?? '';
+            dimensionsInput.value = matchingCatalogProduct.dimensions ?? '';
+            priceInput.value = matchingCatalogProduct.price ?? '';
+            formatPriceInput(priceInput, true);
+            colorInput.value = matchingCatalogProduct.colors.length === 1
+                ? matchingCatalogProduct.colors[0]
+                : '';
+        } else {
+            productIdInput.value = '';
+            if (previouslySelectedCatalogId !== '') {
+                categoryInput.value = '';
+                categoryIdInput.value = '';
+                dimensionsInput.value = '';
+                priceInput.value = '';
+                colorInput.value = '';
+                delete categoryInput.dataset.autofilledProduct;
+            }
+
+            const matchingProduct = productOptions.find(product =>
+                product.name.toLocaleLowerCase() === input.value.trim().toLocaleLowerCase()
+            );
+            if (matchingProduct) {
+                categoryInput.value = matchingProduct.category_name ?? '';
+                categoryInput.dataset.autofilledProduct = matchingProduct.name;
+                categoryIdInput.value = matchingProduct.category_id ?? '';
+                dimensionsInput.value = matchingProduct.dimensions ?? '';
+            } else if (previouslyAutofilledProduct) {
+                categoryInput.value = '';
+                categoryIdInput.value = '';
+                dimensionsInput.value = '';
+                delete categoryInput.dataset.autofilledProduct;
+            }
+        }
+
+        calculateTotal();
+    }
+
+    function setGuestSource(source)
+    {
+        const select = document.getElementById('guest-source-select');
+        const customInput = document.getElementById('guest-source-custom');
+        const knownSources = ['Gmaps', 'Instagram', 'Website', 'Lokal'];
+
+        if (knownSources.includes(source)) {
+            select.value = source;
+            customInput.value = '';
+        } else if (source) {
+            select.value = '__custom';
+            customInput.value = source;
+        } else {
+            select.value = '';
+            customInput.value = '';
+        }
+
+        updateGuestSource();
+    }
+
+    function updateGuestSource()
+    {
+        const select = document.getElementById('guest-source-select');
+        const customInput = document.getElementById('guest-source-custom');
+        const isCustom = select.value === '__custom';
+
+        customInput.hidden = !isCustom;
+        customInput.disabled = !isCustom;
+        customInput.required = isCustom;
+
+        if (!isCustom) {
+            customInput.value = '';
+        }
+    }
 
     function updateGuestPhone(input)
     {
@@ -903,6 +864,8 @@
 
         guestWrapper.querySelector('[name="guest_id"]').value = matchingGuest?.id ?? '';
         guestWrapper.querySelector('[name="guest_name"]').value = matchingGuest?.name ?? input.value.trim();
+        input.closest('.row').querySelector('[name="guest_address"]').value = matchingGuest?.address ?? '';
+        setGuestSource(matchingGuest?.guest_source ?? '');
 
         const phoneInput = input.closest('.row').querySelector('[name="phone"]');
         if (matchingGuest && !phoneInput.value) {
@@ -977,8 +940,10 @@
                 activeGuestInput.value = guest.name;
                 activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_id"]').value = guest.id;
                 activeGuestInput.closest('.guest-wrapper').querySelector('[name="guest_name"]').value = guest.name;
+                activeGuestInput.closest('.row').querySelector('[name="guest_address"]').value = guest.address ?? '';
             }
 
+            setGuestSource('');
             closeGuestModal();
         } catch (error) {
             console.error(error);
@@ -1156,10 +1121,6 @@
                 data.category;
 
 
-            const option = document.createElement('option');
-            option.value = category.name;
-            document.getElementById('category-options').appendChild(option);
-
             categories.push(category);
 
             if (activeCategoryInput) {
@@ -1185,58 +1146,16 @@
     // Otomatis buat satu product
     // ketika halaman dibuka
 
-    const orderForm = document.querySelector('form');
-    const orderIdInput = orderForm.querySelector('[name="order_id"]');
-    const orderIdError = document.getElementById('order-id-error');
-
-    orderIdInput.addEventListener('input', function () {
-        orderIdError.innerText = '';
-    });
-
-    orderForm.addEventListener('submit', async function (event) {
-        event.preventDefault();
-        orderIdError.innerText = '';
-
-        try {
-            const response = await fetch(
-                `{{ route('orders.check-id') }}?order_id=${encodeURIComponent(orderIdInput.value.trim())}`,
-                { headers: { Accept: 'application/json' } }
-            );
-            const data = await response.json();
-
-            if (!response.ok || !data.available) {
-                orderIdError.innerText = data.message
-                    ?? data.errors?.order_id?.[0]
-                    ?? 'Gagal memeriksa Order ID.';
-                orderIdInput.focus();
-                return;
-            }
-        } catch (error) {
-            console.error(error);
-            orderIdError.innerText = 'Tidak dapat memeriksa Order ID. Coba lagi.';
-            return;
-        }
-
-        this.querySelectorAll('[name*="[price]"]').forEach(input => {
-            input.value = input.value.replace(/,/g, '');
-        });
-
-        HTMLFormElement.prototype.submit.call(this);
-    });
-
-
-    document.addEventListener('DOMContentLoaded', function () {
-
-        if (oldItems.length > 0) {
-            oldItems.forEach(oldItem => addProduct(oldItem));
-            return;
-        }
-
+    if (oldItems.length > 0) {
+        oldItems.forEach(oldItem => addProduct(oldItem));
+    } else {
         addProduct();
+    }
 
+    document.querySelectorAll('[data-money-input]').forEach(input => {
+        formatPriceInput(input);
     });
 
 </script>
 
-</body>
-</html>
+@endsection

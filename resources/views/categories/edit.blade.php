@@ -1,16 +1,18 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Edit Category</title>
-</head>
+@extends('layouts.admin')
 
-<body style="font-family:Arial;margin:40px;">
+@section('title', 'Ubah Kategori')
 
-<h1>Edit Category</h1>
+@section('content')
+<div class="page-heading">
+    <div>
+        <p class="page-eyebrow">Master data</p>
+        <h1>Ubah Kategori</h1>
+        <p>Perbarui nama kategori produk.</p>
+    </div>
+</div>
 
 @if($errors->any())
-    <div style="color:red;">
+    <div class="field-error">
         <ul>
             @foreach($errors->all() as $error)
                 <li>{{ $error }}</li>
@@ -20,6 +22,7 @@
 @endif
 
 <form
+    class="card compact-form"
     action="{{ route('categories.update', $category) }}"
     method="POST"
 >
@@ -27,33 +30,23 @@
     @csrf
     @method('PUT')
 
-    <div style="margin-bottom:15px;">
+    <div>
 
-        <label>
-            Category Name
-        </label>
-
-        <br>
+        <label for="name">Nama Kategori</label>
 
         <input
+            id="name"
             type="text"
             name="name"
             value="{{ old('name', $category->name) }}"
             required
-            style="padding:10px;width:300px;"
         >
 
     </div>
 
-    <button type="submit">
-        Update Category
-    </button>
+    <button class="btn-primary" type="submit">Simpan Perubahan</button>
 
-    <a href="{{ route('categories.index') }}">
-        Cancel
-    </a>
+    <a class="btn" href="{{ route('categories.index') }}">Batal</a>
 
 </form>
-
-</body>
-</html>
+@endsection

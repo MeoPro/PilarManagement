@@ -1,11 +1,19 @@
 <?php
 
+use App\Models\Category;
 use App\Models\Color;
 use App\Models\Guest;
 use App\Models\Order;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
+
+beforeEach(function () {
+    $this->actingAs(User::factory()->admin()->create());
+});
 
 test('warna baru dapat ditambahkan ke daftar warna', function () {
     $response = $this->postJson(route('colors.store'), [
@@ -63,6 +71,66 @@ test('form order menampilkan warna katalog dan warna lama pada edit', function (
         ->assertSee('Service');
 });
 
+test('form order suggests products and selectable categories and preselects the guest source', function () {
+    $guest = Guest::create(['name' => 'Historical Product Guest']);
+    $category = Category::factory()->create(['name' => 'Historical Category']);
+    Order::create([
+        'order_id' => 'HISTORICAL-PRODUCT-ORDER-OLD',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Website',
+        'total_order' => 100,
+        'status' => 'None',
+    ]);
+    $order = Order::create([
+        'order_id' => 'HISTORICAL-PRODUCT-ORDER',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Instagram',
+        'total_order' => 100,
+        'status' => 'None',
+    ]);
+    $order->items()->create([
+        'product' => 'Historical Dining Table',
+        'category_id' => $category->id,
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'None',
+    ]);
+
+    $this->get(route('orders.create'))
+        ->assertSee('<datalist id="product-options">', false)
+        ->assertSee('<option value="Historical Dining Table">', false)
+        ->assertSee('<datalist id="category-options">', false)
+        ->assertSee('<option value="Historical Category"></option>', false)
+        ->assertSee('list="category-options"', false)
+        ->assertSee('"guest_source":"Instagram"', false)
+        ->assertSee('value="__custom"', false);
+});
+
+test('order status tabs return only filtered results for asynchronous requests', function () {
+    Order::create([
+        'order_id' => 'AJAX-PENDING-ORDER',
+        'guest_name' => 'Pending Guest',
+        'total_order' => 100,
+        'status' => 'None',
+    ]);
+    Order::create([
+        'order_id' => 'AJAX-PROCESSING-ORDER',
+        'guest_name' => 'Processing Guest',
+        'total_order' => 100,
+        'status' => 'Proses Produksi',
+    ]);
+
+    $this->withHeaders(['X-Requested-With' => 'XMLHttpRequest'])
+        ->get(route('orders.index', ['status' => 'None']))
+        ->assertSeeText('AJAX-PENDING-ORDER')
+        ->assertDontSeeText('AJAX-PROCESSING-ORDER')
+        ->assertSee('id="order-results"', false)
+        ->assertDontSee('<!doctype html>', false);
+});
+
 test('daftar tamu menampilkan detail order tersimpan dan mendukung pencarian', function () {
     $guest = Guest::create(['name' => 'Guest Directory Match']);
     $guest->phones()->create(['phone' => '08123456789']);
@@ -95,6 +163,244 @@ test('daftar tamu menampilkan detail order tersimpan dan mendukung pencarian', f
         ->assertSee('ORD-GUEST-001')
         ->assertSee('Rp 1.250.000')
         ->assertDontSee('ORD-GUEST-002');
+});
+
+test('guest list shows completed debt separately from all unpaid non-cancelled orders', function () {
+    $guest = Guest::create(['name' => 'Guest With Debt']);
+
+    Order::create([
+        'order_id' => 'ORD-DEBT-COMPLETE',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 500000,
+        'paid_amount' => 200000,
+        'status' => 'Selesai',
+    ]);
+    Order::create([
+        'order_id' => 'ORD-DEBT-IN-PROGRESS',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 400000,
+        'paid_amount' => 0,
+        'status' => 'Proses Produksi',
+    ]);
+
+    $response = $this->get(route('guests.index'));
+
+    $response->assertSee('Hutang')
+        ->assertSee('Sisa Pembayaran')
+        ->assertSee('Rp 300.000')
+        ->assertSee('Rp 700.000');
+
+    expect(Order::where('order_id', 'ORD-DEBT-COMPLETE')->firstOrFail()->is_debt)->toBeTrue()
+        ->and(Order::where('order_id', 'ORD-DEBT-IN-PROGRESS')->firstOrFail()->is_debt)->toBeFalse();
+});
+
+test('guest list payment balance excludes cancelled orders and counts partial payments', function () {
+    $guest = Guest::create(['name' => 'Payment Balance Guest']);
+    foreach ([
+        ['GUEST-BALANCE-ACTIVE', 'Proses Produksi', 100000, 25000],
+        ['GUEST-BALANCE-CANCELLED', 'Cancel', 50000, 0],
+        ['GUEST-BALANCE-PAID', 'Selesai', 30000, 30000],
+    ] as [$orderId, $status, $total, $paid]) {
+        Order::create([
+            'order_id' => $orderId,
+            'guest_id' => $guest->id,
+            'guest_name' => $guest->name,
+            'total_order' => $total,
+            'paid_amount' => $paid,
+            'status' => $status,
+        ]);
+    }
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->get(route('guests.index'))
+        ->assertSee('Rp 75.000');
+});
+
+test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', function () {
+    $guest = Guest::create(['name' => 'Payment Guest']);
+    $payload = [
+        'order_id' => 'ORD-PAYMENT',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'status' => 'None',
+        'paid_amount' => '250,000',
+        'items' => [[
+            'product' => 'Payment Product',
+            'dimensions' => '10x10x10',
+            'qty' => 2,
+            'price' => '250,000',
+            'source' => 'Order',
+            'status' => 'None',
+        ]],
+    ];
+
+    $this->post(route('orders.store'), $payload)
+        ->assertRedirect(route('orders.index'));
+
+    $order = Order::where('order_id', 'ORD-PAYMENT')->firstOrFail();
+    $order->items()->firstOrFail()->update([
+        'status' => 'Ready',
+        'factory_status' => 'Ready',
+    ]);
+    expect((float) $order->paid_amount)->toBe(250000.0)
+        ->and($order->paid_percentage)->toBe(50.0)
+        ->and($order->amount_remaining)->toBe(250000.0)
+        ->and($order->is_debt)->toBeFalse();
+
+    $this->get(route('orders.index', ['search' => 'ORD-PAYMENT']))
+        ->assertSee('50,0%')
+        ->assertSee('Sisa Rp 250,000')
+        ->assertSee('Belum lunas');
+
+    $this->put(route('orders.update', $order), array_merge($payload, [
+        'status' => 'Selesai',
+        'paid_amount' => '500,001',
+        'items' => [[
+            'id' => $order->items()->value('id'),
+            'product' => 'Payment Product',
+            'qty' => 2,
+            'price' => '250,000',
+            'source' => 'Order',
+            'status' => 'Ready',
+        ]],
+    ]))->assertSessionHasErrors('paid_amount');
+
+    $this->put(route('orders.update', $order), [
+        'order_id' => 'ORD-PAYMENT',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'paid_amount' => '500,000',
+        'status' => 'Selesai',
+        'items' => [[
+            'id' => $order->items()->value('id'),
+            'product' => 'Payment Product',
+            'qty' => 2,
+            'price' => '250,000',
+            'source' => 'Order',
+            'status' => 'Ready',
+        ]],
+    ])->assertRedirect(route('orders.index'));
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'paid_amount' => 500000,
+        'status' => 'Selesai',
+    ]);
+    expect($order->fresh()->is_paid)->toBeTrue()
+        ->and($order->fresh()->is_debt)->toBeFalse();
+});
+
+test('order saves the guest source for autofill on future orders and accepts x-separated dimensions', function () {
+    $guest = Guest::create(['name' => 'Guest Source Autofill']);
+
+    $this->post(route('orders.store'), [
+        'order_id' => 'SPK-GUEST-SOURCE',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Instagram',
+        'order_type' => 'Bali',
+        'paid_amount' => 0,
+        'items' => [[
+            'product' => 'Dimension Product',
+            'dimensions' => '10x10x10',
+            'qty' => 1,
+            'price' => 1000,
+            'source' => 'Order',
+        ]],
+    ])
+        ->assertRedirect(route('orders.index'));
+
+    $this->assertDatabaseHas('guests', [
+        'id' => $guest->id,
+        'guest_source' => 'Instagram',
+    ]);
+    $this->assertDatabaseHas('order_items', [
+        'order_id' => Order::query()->where('order_id', 'SPK-GUEST-SOURCE')->value('id'),
+        'dimensions' => '10x10x10',
+    ]);
+
+    $this->get(route('orders.create'))
+        ->assertSee('<label>SPK</label>', false)
+        ->assertSee('"guest_source":"Instagram"', false);
+});
+
+test('order dapat diubah ke nama tamu baru tanpa guest id', function () {
+    $guest = Guest::create(['name' => 'Current Guest']);
+    $order = Order::create([
+        'order_id' => 'ORD-RENAME-GUEST',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'total_order' => 100000,
+        'status' => 'None',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Guest Rename Product',
+        'qty' => 1,
+        'price' => 100000,
+        'source' => 'Order',
+        'status' => 'Ready',
+    ]);
+
+    $response = $this->put(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => '',
+        'guest_name' => 'Replacement Guest',
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'paid_amount' => 0,
+        'status' => 'None',
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'qty' => 1,
+            'price' => 100000,
+            'source' => 'Order',
+            'status' => 'Ready',
+        ]],
+    ]);
+
+    $response->assertRedirect(route('orders.index'));
+    $replacementGuest = Guest::where('name', 'Replacement Guest')->firstOrFail();
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'guest_id' => $replacementGuest->id,
+        'guest_name' => 'Replacement Guest',
+    ]);
+});
+
+test('order baru dapat menyimpan nama tamu tanpa guest id', function () {
+    $response = $this->post(route('orders.store'), [
+        'order_id' => 'ORD-NEW-GUEST',
+        'guest_id' => '',
+        'guest_name' => 'First Order Guest',
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'status' => 'None',
+        'items' => [[
+            'product' => 'First Guest Product',
+            'dimensions' => '10x10x10',
+            'qty' => 1,
+            'price' => 100000,
+            'source' => 'Order',
+            'status' => 'None',
+        ]],
+    ]);
+
+    $response->assertRedirect(route('orders.index'));
+    $guest = Guest::where('name', 'First Order Guest')->firstOrFail();
+    $this->assertDatabaseHas('orders', [
+        'order_id' => 'ORD-NEW-GUEST',
+        'guest_id' => $guest->id,
+        'guest_name' => 'First Order Guest',
+    ]);
 });
 
 test('tamu baru dapat ditambahkan dan dipakai sebagai pilihan order berikutnya', function () {
@@ -142,10 +448,12 @@ test('nomor baru dicatat di guest ID yang sama tanpa membuat guest baru', functi
             'guest_id' => $guest->id,
             'guest_name' => $guest->name,
             'guest_source' => 'Lokal',
+            'order_type' => 'Bali',
             'phone' => $phone,
             'status' => 'None',
             'items' => [[
                 'product' => 'Product '.$orderId,
+                'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 100,
                 'source' => 'Order',
@@ -252,6 +560,117 @@ test('daftar tamu mengurutkan alfabet tanpa membedakan huruf kapital', function 
     $response = $this->get(route('guests.index'));
 
     $response->assertSeeInOrder(['cef', 'Devano']);
+});
+
+test('laporan kategori mengurutkan jumlah unit terjual dan tidak menghitung order yang dibatalkan', function () {
+    $guest = Guest::create(['name' => 'Category Report Guest']);
+    $popularCategory = Category::create(['name' => 'Popular Category']);
+    $lessPopularCategory = Category::create(['name' => 'Less Popular Category']);
+    $cancelledCategory = Category::create(['name' => 'Cancelled Category']);
+
+    $orders = collect([
+        ['ORD-CATEGORY-1', 'None', 100],
+        ['ORD-CATEGORY-2', 'Selesai', 200],
+        ['ORD-CATEGORY-CANCELLED', 'Cancel', 300],
+    ])->map(fn ($attributes) => Order::create([
+        'order_id' => $attributes[0],
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => $attributes[2],
+        'status' => $attributes[1],
+    ]));
+
+    $orders[0]->items()->create([
+        'product' => 'Popular Product One',
+        'category_id' => $popularCategory->id,
+        'qty' => 4,
+        'price' => 25,
+    ]);
+    $orders[1]->items()->create([
+        'product' => 'Popular Product Two',
+        'category_id' => $popularCategory->id,
+        'qty' => 3,
+        'price' => 25,
+    ]);
+    $orders[0]->items()->create([
+        'product' => 'Less Popular Product',
+        'category_id' => $lessPopularCategory->id,
+        'qty' => 5,
+        'price' => 20,
+    ]);
+    $orders[2]->items()->create([
+        'product' => 'Cancelled Product',
+        'category_id' => $cancelledCategory->id,
+        'qty' => 100,
+        'price' => 3,
+    ]);
+
+    $response = $this->get(route('reports.popular-categories'));
+
+    $response->assertSeeInOrder([
+        'Popular Category',
+        '7 unit',
+        'Less Popular Category',
+        '5 unit',
+    ])->assertDontSee('Cancelled Category');
+});
+
+test('profil tamu menampilkan total belanja dan riwayat pembelian milik tamu saja', function () {
+    $guest = Guest::create([
+        'name' => 'History <script>alert("guest")</script>',
+        'address' => 'Jl. Melati No. 10',
+    ]);
+    $guest->phones()->create(['phone' => '08123456789']);
+    $category = Category::create(['name' => 'Guest History Category']);
+
+    $purchase = Order::create([
+        'order_id' => 'ORD-GUEST-HISTORY',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 350000,
+        'status' => 'Selesai',
+    ]);
+    $purchase->items()->create([
+        'product' => '<script>alert("product")</script>',
+        'category_id' => $category->id,
+        'qty' => 2,
+        'price' => 175000,
+    ]);
+
+    Order::create([
+        'order_id' => 'ORD-GUEST-CANCELLED',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 900000,
+        'status' => 'Cancel',
+    ]);
+
+    Order::create([
+        'order_id' => 'ORD-OTHER-GUEST-HISTORY',
+        'guest_name' => 'Other Guest',
+        'total_order' => 100000,
+        'status' => 'Selesai',
+    ]);
+
+    $response = $this->get(route('guests.show', $guest));
+
+    $response->assertSee('Jl. Melati No. 10')
+        ->assertSee('08123456789')
+        ->assertSee('Rp 350.000')
+        ->assertSee('ORD-GUEST-HISTORY')
+        ->assertSee('Guest History Category')
+        ->assertSee('× 2')
+        ->assertSee('&lt;script&gt;', false)
+        ->assertDontSee('ORD-GUEST-CANCELLED')
+        ->assertDontSee('ORD-OTHER-GUEST-HISTORY')
+        ->assertDontSee('<script>alert("guest")</script>', false)
+        ->assertDontSee('<script>alert("product")</script>', false);
+});
+
+test('profil tamu yang tidak ditemukan mengembalikan 404', function () {
+    $response = $this->get(route('guests.show', 999999));
+
+    $response->assertNotFound();
 });
 
 test('index order mencari berdasarkan informasi order dan produk', function () {
@@ -455,6 +874,45 @@ test('index menyediakan empat pilihan pengurutan order', function () {
     ])->assertSee('value="remaining_less" selected', false);
 });
 
+test('jenis order memfilter daftar dan ekspor CSV menyertakan alamat tamu', function () {
+    $exportGuest = Guest::create([
+        'name' => 'Export Guest',
+        'address' => 'Jalan Ekspor 10',
+    ]);
+
+    Order::create([
+        'order_id' => 'ORD-EXPORT-MATCH',
+        'guest_id' => $exportGuest->id,
+        'guest_name' => $exportGuest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Ekspor',
+        'total_order' => 120000,
+        'status' => 'Proses Produksi',
+    ]);
+
+    Order::create([
+        'order_id' => 'ORD-EXPORT-OTHER',
+        'guest_name' => 'Local Guest',
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'total_order' => 50000,
+        'status' => 'Proses Produksi',
+    ]);
+
+    $listResponse = $this->get(route('orders.index', ['order_type' => 'Ekspor']));
+    $exportResponse = $this->get(route('orders.export', ['order_type' => 'Ekspor']));
+
+    $listResponse->assertSee('ORD-EXPORT-MATCH')
+        ->assertDontSee('ORD-EXPORT-OTHER');
+    $exportResponse->assertOk();
+    $exportResponse->assertDownload('daftar-order.csv');
+
+    expect($exportResponse->streamedContent())
+        ->toContain('ORD-EXPORT-MATCH')
+        ->toContain('Jalan Ekspor 10')
+        ->not->toContain('ORD-EXPORT-OTHER');
+});
+
 test('index menempatkan order selesai di bawah order yang belum selesai', function () {
     $completedOrder = Order::create([
         'order_id' => 'ORD-COMPLETED',
@@ -526,44 +984,424 @@ test('index menandai deadline hari ini dan deadline yang sudah lewat', function 
         ->assertSeeText('Terlambat 3 hari');
 });
 
+test('order menyimpan jenis order dan memperbarui alamat tamu opsional', function () {
+    $guest = Guest::create(['name' => 'Guest With Address']);
+
+    $response = $this->post(route('orders.store'), [
+        'order_id' => 'ORD-ADDRESS',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'guest_address' => 'Jalan Melati 25',
+        'order_type' => 'Luar Bali',
+        'status' => 'None',
+        'items' => [[
+            'product' => 'Address Test Product',
+            'dimensions' => '10x10x10',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'None',
+        ]],
+    ]);
+
+    $response->assertRedirect(route('orders.index'));
+    $this->assertDatabaseHas('orders', [
+        'order_id' => 'ORD-ADDRESS',
+        'order_type' => 'Luar Bali',
+    ]);
+    $this->assertDatabaseHas('guests', [
+        'id' => $guest->id,
+        'address' => 'Jalan Melati 25',
+    ]);
+});
+
+test('order yang terlambat ditampilkan urgent kecuali order selesai atau dibatalkan', function () {
+    $this->travelTo(now()->startOfDay()->addHours(12));
+
+    $overdueOrder = Order::create([
+        'order_id' => 'ORD-OVERDUE-STATUS',
+        'guest_name' => 'Overdue Guest',
+        'total_order' => 0,
+        'deadline' => today()->subDay(),
+        'status' => 'Proses Produksi',
+    ]);
+
+    $completedOrder = Order::create([
+        'order_id' => 'ORD-OVERDUE-COMPLETED',
+        'guest_name' => 'Completed Guest',
+        'total_order' => 0,
+        'deadline' => today()->subDay(),
+        'status' => 'Selesai',
+    ]);
+
+    $cancelledOrder = Order::create([
+        'order_id' => 'ORD-OVERDUE-CANCELLED',
+        'guest_name' => 'Cancelled Guest',
+        'total_order' => 0,
+        'deadline' => today()->subDay(),
+        'status' => 'Cancel',
+    ]);
+
+    $indexResponse = $this->get(route('orders.index', ['search' => 'ORD-OVERDUE-']));
+    $overdueResponse = $this->get(route('orders.show', $overdueOrder));
+    $completedResponse = $this->get(route('orders.show', $completedOrder));
+    $cancelledResponse = $this->get(route('orders.show', $cancelledOrder));
+
+    $indexResponse->assertSee('ORD-OVERDUE-STATUS')
+        ->assertSeeText('URGENT')
+        ->assertSeeText('Terlambat 1 hari');
+    $overdueResponse->assertSeeText('URGENT');
+    $completedResponse->assertDontSee('URGENT')
+        ->assertSeeText('Selesai');
+    $cancelledResponse->assertDontSee('URGENT')
+        ->assertSeeText('Cancel');
+});
+
+test('jenis order wajib dipilih saat menyimpan order', function () {
+    $guest = Guest::create(['name' => 'Type Required Guest']);
+
+    $response = $this->post(route('orders.store'), [
+        'order_id' => 'ORD-TYPE-REQUIRED',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'status' => 'None',
+        'items' => [[
+            'product' => 'Type Required Product',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'None',
+        ]],
+    ]);
+
+    $response->assertSessionHasErrors('order_type');
+    $this->assertDatabaseMissing('orders', [
+        'order_id' => 'ORD-TYPE-REQUIRED',
+    ]);
+});
+
 test('form order baru tidak menyediakan pilihan status order', function () {
     $response = $this->get(route('orders.create'));
 
     $response->assertSee('Status Order')
         ->assertSee('Service')
         ->assertSee('Sumber Tamu')
+        ->assertSee('Lokasi Tujuan')
+        ->assertSee('Ekspor')
+        ->assertSee('Bali')
+        ->assertSee('Luar Bali')
+        ->assertSee('Alamat Tamu (opsional)')
         ->assertSee('Lokal')
-        ->assertSee('Online')
-        ->assertSee('Touris')
-        ->assertSee('None')
+        ->assertSee('Gmaps')
+        ->assertSee('Instagram')
+        ->assertSee('Website')
+        ->assertSee('data-deadline-control', false)
+        ->assertSee('data-deadline-date', false)
+        ->assertSee('data-deadline-days', false)
+        ->assertSee('New')
+        ->assertDontSee('name="status"', false)
+        ->assertDontSee('name="items[${productIndex}][status]"', false)
+        ->assertDontSee('name="items[${productIndex}][status_images][]"', false);
+
+    $guest = Guest::create(['name' => 'Read Only Order Guest']);
+    $order = Order::create([
+        'order_id' => 'READ-ONLY-ORDER-STATUS',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'status' => 'None',
+    ]);
+
+    $this->get(route('orders.edit', $order))
+        ->assertSee('Status Order')
+        ->assertSee('New')
         ->assertDontSee('<select name="status">', false);
 });
 
-test('order baru selalu dibuat dengan status none', function () {
+test('produk order baru selalu New dan tidak muncul di Factory sebelum mockup diunggah', function () {
+    Storage::fake('public');
     $guest = Guest::create(['name' => 'Guest']);
 
-    $response = $this->post(route('orders.store'), [
+    $payload = [
         'order_id' => 'ORD-003',
         'guest_id' => $guest->id,
         'guest_name' => 'Guest',
         'guest_source' => 'Online',
-        'status' => 'Selesai',
+        'order_type' => 'Ekspor',
+        'status' => 'None',
         'items' => [
             [
                 'product' => 'Product One',
+                'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 100,
                 'source' => 'Stock',
                 'status' => 'Produksi',
+                'status_image' => UploadedFile::fake()->create('production.jpg', 100, 'image/jpeg'),
             ],
         ],
-    ]);
+    ];
+
+    $this->post(route('orders.store'), $payload)
+        ->assertSessionHasErrors(['items.0.status', 'items.0.status_image']);
+
+    unset($payload['items'][0]['status'], $payload['items'][0]['status_image']);
+    $response = $this->post(route('orders.store'), $payload);
 
     $response->assertRedirect(route('orders.index'));
     $order = Order::where('order_id', 'ORD-003')->firstOrFail();
+    $item = $order->items()->firstOrFail();
 
     expect($order->status)->toBe('None')
-        ->and($order->guest_source)->toBe('Online');
+        ->and($order->guest_source)->toBe('Online')
+        ->and($item->status)->toBe('None')
+        ->and($item->factory_status)->toBe('None')
+        ->and($item->status_image)->toBeNull();
+
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['orders', 'order_products'],
+    ]);
+    $this->actingAs($factoryAdmin)
+        ->get(route('order-products.index'))
+        ->assertDontSeeText('ORD-003')
+        ->assertDontSeeText('Product One');
+    $this->get(route('orders.index'))
+        ->assertDontSeeText('ORD-003')
+        ->assertDontSeeText('Product One');
+    $this->get(route('orders.show', $order))->assertNotFound();
+});
+
+test('endpoint produksi menolak perubahan status order tanpa perubahan produk', function () {
+    $admin = User::factory()->admin()->create();
+    $guest = Guest::create(['name' => 'Order Status Endpoint Guest']);
+    $order = Order::create([
+        'order_id' => 'AUTOMATIC-STATUS-ENDPOINT',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'status' => 'None',
+    ]);
+
+    $this->actingAs($admin)
+        ->patch(route('orders.production.update', $order), [
+            'status' => 'Selesai',
+        ])
+        ->assertSessionHasErrors('items');
+
+    expect($order->fresh()->status)->toBe('None');
+});
+
+test('order changes to production when every product enters production', function () {
+    Storage::fake('public');
+    $guest = Guest::create(['name' => 'Production Status Guest']);
+    $order = Order::create([
+        'order_id' => 'ALL-PRODUCTS-PRODUCTION',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 20000,
+        'status' => 'None',
+    ]);
+    $firstItem = $order->items()->create([
+        'product' => 'Production Chair',
+        'qty' => 1,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'None',
+        'factory_status' => 'None',
+    ]);
+    $secondItem = $order->items()->create([
+        'product' => 'Production Table',
+        'qty' => 1,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'None',
+        'factory_status' => 'None',
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->from(route('orders.edit', $order))
+        ->patch(route('orders.production.update', $order), [
+            'items' => [[
+                'id' => $firstItem->id,
+                'status' => 'Produksi',
+                'status_images' => [UploadedFile::fake()->create('chair-mockup.jpg', 100, 'image/jpeg')],
+            ]],
+        ])
+        ->assertRedirect(route('orders.edit', $order));
+
+    expect($order->fresh()->status)->toBe('None');
+
+    $this->from(route('orders.edit', $order))
+        ->patch(route('orders.production.update', $order), [
+            'items' => [[
+                'id' => $secondItem->id,
+                'status' => 'Produksi',
+                'status_images' => [UploadedFile::fake()->create('table-mockup.jpg', 100, 'image/jpeg')],
+            ]],
+        ])
+        ->assertRedirect(route('orders.edit', $order));
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'status' => 'Proses Produksi',
+    ]);
+    $this->assertDatabaseHas('order_items', [
+        'id' => $firstItem->id,
+        'status' => 'Produksi',
+    ]);
+    $this->assertDatabaseHas('order_items', [
+        'id' => $secondItem->id,
+        'status' => 'Produksi',
+    ]);
+});
+
+test('order status updates when all item statuses change through model updates', function () {
+    $order = Order::create([
+        'order_id' => 'MODEL-PRODUCTION-STATUS',
+        'guest_name' => 'Model Status Guest',
+        'total_order' => 200,
+        'status' => 'None',
+    ]);
+    $firstItem = $order->items()->create([
+        'product' => 'Model Status Chair',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'None',
+    ]);
+    $secondItem = $order->items()->create([
+        'product' => 'Model Status Table',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'None',
+    ]);
+
+    $firstItem->update(['status' => 'Produksi']);
+    expect($order->fresh()->status)->toBe('None');
+
+    $secondItem->update(['status' => 'Produksi']);
+
+    expect($order->fresh()->status)->toBe('Proses Produksi');
+});
+
+test('stale new order status is reconciled when the order edit page is opened', function () {
+    $order = Order::create([
+        'order_id' => 'STALE-PRODUCTION-STATUS',
+        'guest_name' => 'Stale Status Guest',
+        'total_order' => 200,
+        'status' => 'None',
+    ]);
+    $order->items()->createMany([
+        [
+            'product' => 'Stale Production Chair',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Produksi',
+        ],
+        [
+            'product' => 'Stale Production Table',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Produksi',
+        ],
+    ]);
+
+    $this->get(route('orders.edit', $order))
+        ->assertSeeText('Proses Produksi');
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+        'status' => 'Proses Produksi',
+    ]);
+});
+
+test('orders with production progress cannot be deleted', function () {
+    $order = Order::create([
+        'order_id' => 'PRODUCTION-DELETE-GUARD',
+        'guest_name' => 'Delete Guard Guest',
+        'total_order' => 100,
+        'status' => 'None',
+    ]);
+    $order->items()->create([
+        'product' => 'Production Delete Guard Item',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+    ]);
+
+    $this->delete(route('orders.destroy', $order))
+        ->assertRedirect(route('orders.index'))
+        ->assertSessionHas('error', 'Order tidak dapat dihapus setelah proses produksi dimulai.');
+
+    $this->assertDatabaseHas('orders', [
+        'id' => $order->id,
+    ]);
+
+    $this->get(route('orders.index', ['search' => $order->order_id]))
+        ->assertDontSee('aria-label="Hapus order '.$order->order_id.'"', false);
+});
+
+test('order accepts a custom guest source and the new destination values', function () {
+    $guest = Guest::create(['name' => 'Custom Source Guest']);
+
+    $this->post(route('orders.store'), [
+        'order_id' => 'ORD-CUSTOM-SOURCE',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => '__custom',
+        'guest_source_custom' => 'Wedding Organizer',
+        'order_type' => 'Luar Bali',
+        'status' => 'None',
+        'items' => [[
+            'product' => 'Custom Source Product',
+            'dimensions' => '10x10x10',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'None',
+        ]],
+    ])->assertRedirect(route('orders.index'));
+
+    $this->assertDatabaseHas('orders', [
+        'order_id' => 'ORD-CUSTOM-SOURCE',
+        'guest_source' => 'Wedding Organizer',
+        'order_type' => 'Luar Bali',
+    ]);
+});
+
+test('order list reports ready percentage using total item quantity', function () {
+    $order = Order::create([
+        'order_id' => 'ORD-READY-UNITS',
+        'guest_name' => 'Ready Units Guest',
+        'status' => 'Proses Produksi',
+    ]);
+    $order->items()->create([
+        'product' => 'Ready Chairs',
+        'qty' => 3,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Ready',
+    ]);
+    $order->items()->create([
+        'product' => 'Working Table',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+    ]);
+
+    $this->get(route('orders.index', ['search' => 'ORD-READY-UNITS']))
+        ->assertSeeText('75,0%')
+        ->assertSeeText('3/4 unit');
+
+    $this->actingAs(User::factory()->factoryAdmin()->create())
+        ->get(route('orders.index', ['search' => 'ORD-READY-UNITS']))
+        ->assertSeeText('75,0%')
+        ->assertSeeText('3/4 unit');
 });
 
 test('order menerima dan menyimpan sumber produk service', function () {
@@ -574,10 +1412,12 @@ test('order menerima dan menyimpan sumber produk service', function () {
         'guest_id' => $guest->id,
         'guest_name' => 'Service Guest',
         'guest_source' => 'Lokal',
+        'order_type' => 'Luar Bali',
         'status' => 'None',
         'items' => [
             [
                 'product' => 'Room Service',
+                'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 50000,
                 'source' => 'Service',
@@ -611,10 +1451,12 @@ test('order baru menolak order id yang sudah digunakan', function () {
         'guest_id' => $newGuest->id,
         'guest_name' => 'New Guest',
         'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
         'status' => 'None',
         'items' => [
             [
                 'product' => 'Preserved Sofa Product',
+                'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 275000,
                 'source' => 'Stock',
@@ -624,7 +1466,7 @@ test('order baru menolak order id yang sudah digunakan', function () {
     ]);
 
     $response->assertSessionHasErrors([
-        'order_id' => 'Order ID sudah digunakan.',
+        'order_id' => 'SPK sudah digunakan.',
     ]);
 
     $formResponse = $this->get(route('orders.create'));
@@ -649,7 +1491,7 @@ test('endpoint pengecekan order id membedakan id yang sudah dan belum dipakai', 
 
     $duplicateResponse->assertOk()
         ->assertJsonPath('available', false)
-        ->assertJsonPath('message', 'Order ID sudah digunakan.');
+        ->assertJsonPath('message', 'SPK sudah digunakan.');
 
     $availableResponse = $this->getJson(route('orders.check-id', [
         'order_id' => 'ORD-AVAILABLE',
@@ -660,7 +1502,7 @@ test('endpoint pengecekan order id membedakan id yang sudah dan belum dipakai', 
         ->assertJsonPath('message', null);
 });
 
-test('order tidak bisa diselesaikan jika masih ada produk yang belum ready', function () {
+test('order tidak dapat ditandai selesai manual jika masih ada produk yang belum ready', function () {
     $guest = Guest::create(['name' => 'Guest']);
 
     $order = Order::create([
@@ -693,7 +1535,7 @@ test('order tidak bisa diselesaikan jika masih ada produk yang belum ready', fun
         'guest_id' => $guest->id,
         'guest_name' => 'Guest Updated',
         'guest_source' => 'Online',
-        'status' => 'Selesai',
+        'order_type' => 'Ekspor',
         'items' => [
             [
                 'id' => $readyItem->id,
@@ -714,16 +1556,14 @@ test('order tidak bisa diselesaikan jika masih ada produk yang belum ready', fun
         ],
     ]);
 
-    $response->assertSessionHasErrors([
-        'status' => 'Order tidak bisa diselesaikan karena semua produk harus berstatus Ready.',
-    ]);
+    $response->assertRedirect(route('orders.index'));
 
     expect($order->fresh()->status)->toBe('Proses Produksi')
         ->and($order->fresh()->guest_name)->toBe('Guest')
         ->and($unfinishedItem->fresh()->status)->toBe('Produksi');
 });
 
-test('order bisa diselesaikan jika semua produk pada perubahan berstatus ready', function () {
+test('status order otomatis menjadi selesai saat semua produk ready', function () {
     $guest = Guest::create(['name' => 'Guest']);
 
     $order = Order::create([
@@ -739,7 +1579,7 @@ test('order bisa diselesaikan jika semua produk pada perubahan berstatus ready',
         'qty' => 1,
         'price' => 100,
         'source' => 'Stock',
-        'status' => 'Produksi',
+        'status' => 'Ready',
     ]);
 
     $secondItem = $order->items()->create([
@@ -747,7 +1587,7 @@ test('order bisa diselesaikan jika semua produk pada perubahan berstatus ready',
         'qty' => 1,
         'price' => 100,
         'source' => 'Order',
-        'status' => 'Distribusi',
+        'status' => 'Ready',
     ]);
 
     $response = $this->put(route('orders.update', $order), [
@@ -755,6 +1595,7 @@ test('order bisa diselesaikan jika semua produk pada perubahan berstatus ready',
         'guest_id' => $guest->id,
         'guest_name' => 'Guest',
         'guest_source' => 'Touris',
+        'order_type' => 'Bali',
         'status' => 'Selesai',
         'items' => [
             [

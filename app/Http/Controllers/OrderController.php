@@ -4,20 +4,59 @@ namespace App\Http\Controllers;
 
 use App\Models\Category;
 use App\Models\Color;
+use App\Models\Employee;
 use App\Models\Guest;
 use App\Models\GuestPhone;
 use App\Models\Order;
+use App\Models\OrderCommentRecipient;
+use App\Models\OrderItem;
+use App\Models\Product;
+use App\Models\Subcontractor;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class OrderController extends Controller
 {
+    private const FACTORY_ORDER_ITEM_STATUSES = [
+        'Produksi',
+        'Proses Kirim',
+        'Distribusi',
+        'Dalam Perjalanan',
+        'Finishing',
+        'Packing',
+        'Ready',
+    ];
+
     public function index(Request $request)
     {
+        $user = $request->user();
+        $canManageSales = $user->isSalesWorkflow();
+        $factoryWorkflow = $user->isFactoryWorkflow();
+        $factoryItemStatuses = self::FACTORY_ORDER_ITEM_STATUSES;
+        $productionSearchItemStatuses = $factoryWorkflow ? $factoryItemStatuses : null;
         $search = trim((string) $request->query('search', ''));
+        $orderType = (string) $request->query('order_type', '');
+        $orderTypes = ['Bali', 'Luar Bali', 'Ekspor'];
+        $statusOptions = ['None', 'Proses Produksi', 'Finishing', 'Selesai', 'Cancel'];
+        $statusFilter = (string) $request->query('status', '');
+
+        if (! in_array($orderType, $orderTypes, true)) {
+            $orderType = '';
+        }
+        if (! in_array($statusFilter, $statusOptions, true)) {
+            $statusFilter = '';
+        }
+
         $sortOptions = [
             'oldest' => 'Order terlama',
             'most' => 'Produk terbanyak',
@@ -30,21 +69,46 @@ class OrderController extends Controller
             $sort = 'remaining_less';
         }
 
-        $orders = Order::with('items.category')
+        $orderQuery = Order::query();
+
+        if (! $canManageSales) {
+            $orderQuery->select(['id', 'order_id', 'status', 'deadline', 'last_edit']);
+
+            if ($factoryWorkflow) {
+                $orderQuery->whereHas('items', fn (Builder $query) => $query
+                    ->whereIn('factory_status', $factoryItemStatuses));
+            }
+        }
+
+        $orders = $orderQuery
+            ->with($canManageSales
+                ? [
+                    'items' => fn ($query) => $query
+                        ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
+                        ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
+                        ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
+                        ->orderBy('id'),
+                    'items.category',
+                    'guest',
+                ]
+                : [
+                    'items' => fn ($query) => $query
+                        ->when($factoryWorkflow, fn ($query) => $query->whereIn('factory_status', $factoryItemStatuses))
+                        ->select('id', 'order_id', 'product', 'category_id', 'qty', 'qty_completed', 'factory_status', 'color', 'source', 'status', 'image')
+                        ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
+                        ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
+                        ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
+                        ->orderBy('id'),
+                    'items.category',
+                ])
+            ->withCount('items')
             ->withSum('items', 'qty')
-            ->when($search !== '', function ($query) use ($search) {
-                $query->where(function ($query) use ($search) {
-                    $query->where('order_id', 'like', "%{$search}%")
-                        ->orWhere('guest_name', 'like', "%{$search}%")
-                        ->orWhere('phone', 'like', "%{$search}%")
-                        ->orWhereHas('items', function ($query) use ($search) {
-                            $query->where('product', 'like', "%{$search}%")
-                                ->orWhereHas('category', function ($query) use ($search) {
-                                    $query->where('name', 'like', "%{$search}%");
-                                });
-                        });
-                });
-            })
+            ->withSum(['items as ready_units' => fn (Builder $query) => $query->where('status', 'Ready')], 'qty')
+            ->when($search !== '', fn (Builder $query) => $canManageSales
+                ? $this->applySearch($query, $search)
+                : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
+            ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType))
+            ->when($statusFilter !== '', fn (Builder $query) => $query->where('status', $statusFilter))
             ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', ['Selesai']);
 
         match ($sort) {
@@ -63,7 +127,110 @@ class OrderController extends Controller
 
         $orders = $orders->oldest('id')->paginate(10)->withQueryString();
 
-        return view('orders.index', compact('orders', 'search', 'sort', 'sortOptions'));
+        if ($canManageSales) {
+            foreach ($orders as $order) {
+                $order->synchronizeProductionStatusFromItems($order->items);
+            }
+        }
+
+        $orderStats = Order::query()->selectRaw(
+            'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
+            ['None', 'None', 'Proses Produksi', 'Finishing', 'Selesai'],
+        )->first();
+
+        if ($canManageSales) {
+            $orderStats->total_revenue = Order::query()
+                ->where('status', '!=', 'Cancel')
+                ->sum('total_order');
+        }
+
+        $statusCountsQuery = Order::query()
+            ->when($search !== '', fn (Builder $query) => $canManageSales
+                ? $this->applySearch($query, $search)
+                : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
+            ->when(
+                $factoryWorkflow && ! $canManageSales,
+                fn (Builder $query) => $query->whereHas('items', fn (Builder $itemQuery) => $itemQuery
+                    ->whereIn('factory_status', $factoryItemStatuses)),
+            )
+            ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType));
+        $statusCounts = $statusCountsQuery
+            ->selectRaw('status, COUNT(*) AS status_count')
+            ->groupBy('status')
+            ->pluck('status_count', 'status');
+        $statusTabs = [
+            ['value' => '', 'label' => 'Semua', 'class' => 'all'],
+            ['value' => 'None', 'label' => 'New', 'class' => 'pending'],
+            ['value' => 'Proses Produksi', 'label' => 'Produksi', 'class' => 'processing'],
+            ['value' => 'Finishing', 'label' => 'Finishing', 'class' => 'finishing'],
+            ['value' => 'Selesai', 'label' => 'Selesai', 'class' => 'completed'],
+            ['value' => 'Cancel', 'label' => 'Batal', 'class' => 'cancelled'],
+        ];
+
+        return view('orders.index', compact(
+            'orders',
+            'search',
+            'sort',
+            'sortOptions',
+            'orderType',
+            'orderTypes',
+            'statusFilter',
+            'statusOptions',
+            'statusCounts',
+            'statusTabs',
+            'orderStats',
+            'canManageSales',
+            'factoryWorkflow',
+        ))->fragmentIf($request->ajax(), 'order-results');
+    }
+
+    public function export(Request $request): StreamedResponse
+    {
+        $validated = $request->validate([
+            'search' => ['nullable', 'string', 'max:255'],
+            'order_type' => ['nullable', Rule::in(['Bali', 'Luar Bali', 'Ekspor'])],
+        ]);
+
+        $search = trim((string) ($validated['search'] ?? ''));
+        $orderType = $validated['order_type'] ?? null;
+        $orders = Order::query()
+            ->with(['guest', 'items'])
+            ->when($search !== '', fn (Builder $query) => $this->applySearch($query, $search))
+            ->when($orderType !== null, fn (Builder $query) => $query->where('order_type', $orderType))
+            ->orderBy('id');
+
+        return response()->streamDownload(function () use ($orders): void {
+            $file = fopen('php://output', 'w');
+            fwrite($file, "\xEF\xBB\xBF");
+            fputcsv($file, ['SPK', 'Nama Tamu', 'Alamat', 'Telepon', 'Sumber Tamu', 'Lokasi Tujuan', 'Produk', 'Total', 'Dibayar', 'Sisa', 'DP (%)', 'Deadline', 'Status', 'Catatan']);
+
+            $orders->chunkById(500, function ($orderBatch) use ($file): void {
+                foreach ($orderBatch as $order) {
+                    $products = $order->items
+                        ->map(fn ($item): string => $item->product.' x'.$item->qty)
+                        ->implode('; ');
+
+                    fputcsv($file, [
+                        $this->safeCsvValue($order->order_id),
+                        $this->safeCsvValue($order->guest_name),
+                        $this->safeCsvValue($order->guest?->address),
+                        $this->safeCsvValue($order->phone),
+                        $this->safeCsvValue($order->guest_source),
+                        $this->safeCsvValue($order->order_type),
+                        $this->safeCsvValue($products),
+                        $order->total_order,
+                        $order->paid_amount,
+                        $order->amount_remaining,
+                        $order->paid_percentage,
+                        $order->deadline?->format('Y-m-d'),
+                        $this->safeCsvValue($order->status),
+                        $this->safeCsvValue($order->note),
+                    ]);
+                }
+            });
+
+            fclose($file);
+        }, 'daftar-order.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
     }
 
     public function create()
@@ -71,8 +238,10 @@ class OrderController extends Controller
         $categories = Category::orderBy('name')->get();
         $colors = Color::orderBy('name')->pluck('name');
         $guests = $this->guestOptions();
+        $productOptions = $this->productOptions();
+        $catalogProducts = $this->catalogProductOptions();
 
-        return view('orders.create', compact('categories', 'colors', 'guests'));
+        return view('orders.create', compact('categories', 'colors', 'guests', 'productOptions', 'catalogProducts'));
     }
 
     public function checkOrderId(Request $request)
@@ -85,35 +254,46 @@ class OrderController extends Controller
 
         return response()->json([
             'available' => $isAvailable,
-            'message' => $isAvailable ? null : 'Order ID sudah digunakan.',
+            'message' => $isAvailable ? null : 'SPK sudah digunakan.',
         ]);
     }
 
     public function store(Request $request)
     {
         $validated = $this->validateOrder($request);
-        $validated['guest_name'] = Guest::findOrFail($validated['guest_id'])->name;
+        $validated['paid_amount'] = $this->validatedPaidAmount($validated);
+        $catalogProducts = $this->catalogProductsForItems($validated['items']);
 
-        DB::transaction(function () use ($request, $validated) {
+        DB::transaction(function () use ($request, $validated, $catalogProducts) {
+            $guest = $this->resolveGuest($validated);
+            $guest->update(['guest_source' => $validated['guest_source']]);
 
             $total = 0;
 
             $order = Order::create([
                 'order_id' => $validated['order_id'],
-                'guest_id' => $validated['guest_id'],
-                'guest_name' => $validated['guest_name'],
+                'guest_id' => $guest->id,
+                'guest_name' => $guest->name,
                 'guest_source' => $validated['guest_source'],
+                'order_type' => $validated['order_type'] ?? null,
                 'phone' => $validated['phone'] ?? null,
                 'total_order' => 0,
+                'paid_amount' => $validated['paid_amount'],
                 'deadline' => $validated['deadline'] ?? null,
                 'last_edit' => now(),
                 'status' => 'None',
                 'note' => $validated['note'] ?? null,
             ]);
 
-            $this->rememberGuestPhone($validated['guest_id'], $validated['phone'] ?? null);
+            $this->syncGuestAddress($guest, $validated);
+            $this->rememberGuestPhone($guest->id, $validated['phone'] ?? null);
 
             foreach ($request->items as $index => $item) {
+                $catalogProduct = $this->resolveCatalogProduct($item, $index, $catalogProducts);
+                if ($catalogProduct === null) {
+                    $catalogProduct = $this->createCatalogProduct($item);
+                    $catalogProducts->put($catalogProduct->id, $catalogProduct);
+                }
 
                 $imagePath = null;
 
@@ -121,21 +301,32 @@ class OrderController extends Controller
                     $imagePath = $request
                         ->file("items.$index.image")
                         ->store('orders/products', 'public');
+                } elseif ($catalogProduct !== null) {
+                    $imagePath = $this->copyCatalogImage($catalogProduct);
                 }
 
                 $subtotal = $item['qty'] * $item['price'];
 
                 $total += $subtotal;
 
+                if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
+                    $catalogProduct->update(['price' => $item['price']]);
+                }
+
                 $order->items()->create([
                     'product' => $item['product'],
-                    'category_id' => $item['category_id'] ?? null,
+                    'product_id' => $catalogProduct?->id,
+                    'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                     'qty' => $item['qty'],
                     'price' => $item['price'],
-                    'color' => $item['color'] ?? null,
+                    'dimensions' => $item['dimensions'] ?? null,
+                    'color' => $this->catalogColor($item, $catalogProduct),
                     'source' => $item['source'],
-                    'status' => $item['status'],
+                    'status' => 'None',
+                    'factory_status' => 'None',
                     'image' => $imagePath,
+                    'status_image' => null,
+                    'status_images' => null,
                 ]);
             }
 
@@ -151,68 +342,370 @@ class OrderController extends Controller
 
     public function show(Order $order)
     {
-        $order->load('items.category');
+        $user = request()->user();
 
-        return view('orders.show', compact('order'));
+        $salesWorkflow = $user->isSalesWorkflow();
+        $factoryWorkflow = $user->isFactoryWorkflow();
+        $canAssignSubcontractors = $factoryWorkflow && $user->canAccessMenu('subcontractors');
+        $canAssignPiecework = $factoryWorkflow && $user->canAccessMenu('order_products');
+
+        if ($salesWorkflow) {
+            $order->load([
+                'items' => fn ($query) => $query
+                    ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
+                    ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
+                    ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
+                    ->orderBy('id'),
+                'items.category',
+                'guest',
+                'items.pieceworkAssignments' => fn ($query) => $query
+                    ->with('employee')
+                    ->withSum('pieceworkItems as produced_quantity', 'quantity'),
+                'events',
+            ]);
+            $order->synchronizeProductionStatusFromItems($order->items);
+        } else {
+            abort_unless($factoryWorkflow, 403);
+            abort_unless(
+                $order->items()->whereIn('factory_status', self::FACTORY_ORDER_ITEM_STATUSES)->exists(),
+                404,
+            );
+            $order = Order::query()
+                ->select(['id', 'order_id', 'status', 'deadline', 'last_edit'])
+                ->findOrFail($order->id);
+            $order->load([
+                'items' => fn ($query) => $query
+                    ->whereIn('factory_status', self::FACTORY_ORDER_ITEM_STATUSES)
+                    ->select(
+                        'id',
+                        'order_id',
+                        'product',
+                        'category_id',
+                        'dimensions',
+                        'qty',
+                        'qty_completed',
+                        'factory_status',
+                        'factory_drawing_image',
+                        'packed_quantity',
+                        'quality_damaged_quantity',
+                        'color',
+                        'source',
+                        'status',
+                        'image',
+                        'status_image',
+                        'status_images',
+                    )
+                    ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
+                    ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
+                    ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
+                    ->orderBy('id'),
+                'items.category',
+                'items.pieceworkItems.employee',
+                'items.pieceworkItems.attendance.employee',
+                'items.pieceworkAssignments' => fn ($query) => $query
+                    ->with('employee')
+                    ->withSum('pieceworkItems as produced_quantity', 'quantity'),
+                'items.activeSubcontractorAssignments.subcontractor',
+                'events',
+            ]);
+        }
+
+        $subcontractors = $canAssignSubcontractors
+            ? Subcontractor::query()->where('is_active', true)->orderBy('name')->get(['id', 'name'])
+            : collect();
+        $factoryEmployees = $canAssignPiecework
+            ? Employee::query()
+                ->where('business_unit', User::UNIT_FACTORY)
+                ->where('status', 'Aktif')
+                ->where('employee_type', 'Borongan')
+                ->orderBy('full_name')
+                ->get(['id', 'full_name'])
+            : collect();
+
+        if ($salesWorkflow) {
+            $order->load([
+                'items.pieceworkItems.employee',
+                'items.pieceworkItems.attendance.employee',
+                'items.pieceworkAssignments' => fn ($query) => $query
+                    ->with('employee')
+                    ->withSum('pieceworkItems as produced_quantity', 'quantity'),
+                'items.activeSubcontractorAssignments.subcontractor',
+            ]);
+        }
+
+        OrderCommentRecipient::query()
+            ->where('user_id', $user->id)
+            ->whereNull('read_at')
+            ->whereHas('comment', fn (Builder $query) => $query->where('order_id', $order->id))
+            ->update([
+                'read_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        $order->load([
+            'comments' => fn ($query) => $query
+                ->whereNull('parent_id')
+                ->with('author')
+                ->withCount(['readRecipients', 'replies']),
+            'comments.replies' => fn ($query) => $query
+                ->with('author')
+                ->withCount('readRecipients'),
+        ]);
+
+        return view('orders.show', compact(
+            'order',
+            'salesWorkflow',
+            'factoryWorkflow',
+            'canAssignSubcontractors',
+            'canAssignPiecework',
+            'factoryEmployees',
+            'subcontractors',
+        ));
+    }
+
+    public function updateProduction(Request $request, Order $order)
+    {
+        $user = $request->user();
+        $factoryWorkflow = $user->isFactoryWorkflow();
+        $salesWorkflow = $user->isSalesWorkflow();
+        abort_unless($salesWorkflow && ! $factoryWorkflow, 403);
+
+        $itemStatuses = ['None', 'Produksi'];
+
+        $validated = $request->validate([
+            'items' => ['sometimes', 'array'],
+            'items.*.id' => ['required', 'integer'],
+            'items.*.status' => ['required', Rule::in($itemStatuses)],
+            'items.*.comment' => ['nullable', 'string', 'max:2000'],
+            'items.*.status_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'items.*.status_images' => ['nullable', 'array', 'min:1', 'max:10'],
+            'items.*.status_images.*' => ['image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+        ]);
+
+        if (empty($validated['items'])) {
+            throw ValidationException::withMessages([
+                'items' => 'Pilih perubahan produk terlebih dahulu.',
+            ]);
+        }
+
+        DB::transaction(function () use ($request, $validated, $order): void {
+            $order = Order::query()->lockForUpdate()->findOrFail($order->id);
+
+            if ($order->status === 'Cancel') {
+                throw ValidationException::withMessages([
+                    'items' => 'Order yang dibatalkan tidak dapat diubah.',
+                ]);
+            }
+
+            foreach ($validated['items'] ?? [] as $itemIndex => $itemData) {
+                $item = $order->items()->lockForUpdate()->findOrFail($itemData['id']);
+                $previousOverallStatus = $item->status;
+                $previousStatus = $item->status;
+                $nextStatus = $itemData['status'];
+                $statusPhotos = $this->statusPhotosFromRequest($request, "items.$itemIndex");
+
+                if ($previousStatus !== 'None'
+                    && ($nextStatus !== $previousStatus || $statusPhotos !== [])) {
+                    throw ValidationException::withMessages([
+                        "items.{$itemIndex}.status" => 'Status dan mockup produk tidak dapat diubah setelah produk masuk Produksi.',
+                    ]);
+                }
+
+                if ($previousStatus === 'None' && $nextStatus === 'None' && $statusPhotos !== []) {
+                    $nextStatus = 'Produksi';
+                }
+
+                if (
+                    in_array($nextStatus, OrderItem::STATUSES_REQUIRING_PHOTO, true)
+                    && $nextStatus !== $previousStatus
+                    && $statusPhotos === []
+                ) {
+                    throw ValidationException::withMessages([
+                        "items.{$itemIndex}.status_images" => 'Mockup produk wajib diunggah saat status diubah ke Produksi atau Distribusi.',
+                    ]);
+                }
+
+                if ($previousStatus === $nextStatus && $statusPhotos === []) {
+                    continue;
+                }
+
+                $statusImagePaths = $item->status_evidence_images;
+                if ($statusPhotos !== []) {
+                    $this->deleteStatusImages($statusImagePaths);
+                    $statusImagePaths = $this->storeStatusPhotos($statusPhotos);
+                }
+                $statusImagePath = $statusImagePaths[0] ?? null;
+
+                if ($nextStatus === 'Produksi' && $previousStatus !== 'Produksi') {
+                    $item->qty_progress_updated_at = now();
+                }
+
+                $item->update([
+                    'status' => $nextStatus,
+                    'factory_status' => $item->activeSubcontractorAssignments()->exists()
+                        ? $item->factory_status
+                        : $nextStatus,
+                    'status_image' => $statusImagePath,
+                    'status_images' => $statusImagePaths ?: null,
+                ]);
+                $item->refresh();
+                $order->update(['last_edit' => now()]);
+                $currentWorkflowStatus = $item->status;
+                if ($previousStatus !== $currentWorkflowStatus) {
+                    $this->recordOrderEvent(
+                        $order,
+                        'item_status_changed',
+                        'Status produk berubah',
+                        "{$order->order_id} - {$item->product}: {$previousStatus} -> {$currentWorkflowStatus}",
+                        $item->id,
+                    );
+                }
+
+                if ($previousOverallStatus !== $item->status) {
+                    $this->recordOrderEvent(
+                        $order,
+                        'item_status_changed',
+                        'Status keseluruhan produk berubah',
+                        "{$order->order_id} - {$item->product}: {$previousOverallStatus} -> {$item->status}",
+                        $item->id,
+                    );
+                }
+
+            }
+
+            $order->synchronizeProductionStatusFromItems();
+        });
+
+        return back()->with('success', 'Status produksi berhasil diperbarui.');
     }
 
     public function edit(Order $order)
     {
-        $order->load('items.category');
+        $order->load(['items.category', 'guest']);
+        $order->synchronizeProductionStatusFromItems($order->items);
 
         $categories = Category::orderBy('name')->get();
         $colors = Color::orderBy('name')->pluck('name');
         $existingColors = $order->items->pluck('color')->filter()->unique();
         $colors = $colors->merge($existingColors)->unique()->sort()->values();
         $guests = $this->guestOptions();
+        $productOptions = $this->productOptions();
+        $catalogProducts = $this->catalogProductOptions();
 
-        return view('orders.edit', compact('order', 'categories', 'colors', 'guests'));
+        return view('orders.edit', compact('order', 'categories', 'colors', 'guests', 'productOptions', 'catalogProducts'));
     }
 
     public function update(Request $request, Order $order)
     {
         $validated = $this->validateOrder($request, $order);
-        $validated['guest_name'] = Guest::findOrFail($validated['guest_id'])->name;
+        $validated['paid_amount'] = $this->validatedPaidAmount($validated, $order);
+        $catalogProducts = $this->catalogProductsForItems($validated['items']);
 
-        if (
-            $validated['status'] === 'Finishing'
-            && $order->items()->where('status', 'Produksi')->exists()
-        ) {
-            throw ValidationException::withMessages([
-                'status' => 'Order tidak bisa masuk Finishing karena masih ada produk dengan status Produksi.',
-            ]);
-        }
-
-        if (
-            $validated['status'] === 'Selesai'
-            && collect($validated['items'])->contains(fn (array $item): bool => $item['status'] !== 'Ready')
-        ) {
-            throw ValidationException::withMessages([
-                'status' => 'Order tidak bisa diselesaikan karena semua produk harus berstatus Ready.',
-            ]);
-        }
-
-        DB::transaction(function () use ($request, $validated, $order) {
+        DB::transaction(function () use ($request, $validated, $order, $catalogProducts) {
+            $guest = $this->resolveGuest($validated);
+            $guest->update(['guest_source' => $validated['guest_source']]);
 
             $total = 0;
+            $previousDeadline = $order->deadline?->toDateString();
+            $previousItems = $order->items()
+                ->get()
+                ->keyBy('id');
+            $submittedItemIds = collect($validated['items'])
+                ->pluck('id')
+                ->filter()
+                ->map(fn ($itemId): int => (int) $itemId)
+                ->all();
+            $completedItemWouldBeRemoved = $order->items()
+                ->where(function (Builder $query): void {
+                    $query->where('qty_completed', '>', 0)
+                        ->orWhereIn('status', ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Dalam Perjalanan', 'Packing', 'Ready'])
+                        ->orWhereIn('factory_status', ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Packing', 'Ready'])
+                        ->orWhereHas('activeSubcontractorAssignments');
+                })
+                ->when($submittedItemIds !== [], fn (Builder $query): Builder => $query->whereNotIn('id', $submittedItemIds))
+                ->lockForUpdate()
+                ->exists();
+
+            if ($completedItemWouldBeRemoved) {
+                throw ValidationException::withMessages([
+                    'items' => 'Produk yang sudah memiliki progres tidak dapat dihapus dari order.',
+                ]);
+            }
+
+            $lockedStatuses = ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Dalam Perjalanan', 'Packing', 'Ready'];
+            foreach ($validated['items'] as $index => $submittedItem) {
+                if (blank($submittedItem['id'] ?? null)) {
+                    continue;
+                }
+
+                $previousItem = $previousItems->get((int) $submittedItem['id']);
+                if (! $previousItem || (
+                    ! in_array($previousItem->status, $lockedStatuses, true)
+                    && ! in_array($previousItem->factory_status, $lockedStatuses, true)
+                    && (int) $previousItem->qty_completed === 0
+                )) {
+                    continue;
+                }
+
+                $changedFields = [
+                    'product' => $submittedItem['product'] !== $previousItem->product,
+                    'qty' => (int) $submittedItem['qty'] !== (int) $previousItem->qty,
+                    'price' => round((float) $submittedItem['price'], 2) !== round((float) $previousItem->price, 2),
+                    'color' => ($submittedItem['color'] ?? null) !== $previousItem->color,
+                    'source' => $submittedItem['source'] !== $previousItem->source,
+                    'status' => $submittedItem['status'] !== $previousItem->status,
+                    'category_id' => array_key_exists('category_id', $submittedItem)
+                        && (int) ($submittedItem['category_id'] ?? 0) !== (int) ($previousItem->category_id ?? 0),
+                    'product_id' => array_key_exists('product_id', $submittedItem)
+                        && (int) ($submittedItem['product_id'] ?? 0) !== (int) ($previousItem->product_id ?? 0),
+                    'dimensions' => array_key_exists('dimensions', $submittedItem)
+                        && $submittedItem['dimensions'] !== $previousItem->dimensions,
+                    'image' => $request->hasFile("items.{$index}.image"),
+                    'status_images' => $this->statusPhotosFromRequest($request, "items.{$index}") !== [],
+                ];
+                $changedField = array_search(true, $changedFields, true);
+
+                if ($changedField !== false) {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.{$changedField}" => 'Produk tidak dapat diubah setelah masuk Produksi.',
+                    ]);
+                }
+            }
 
             $order->update([
                 'order_id' => $validated['order_id'],
-                'guest_id' => $validated['guest_id'],
-                'guest_name' => $validated['guest_name'],
+                'guest_id' => $guest->id,
+                'guest_name' => $guest->name,
                 'guest_source' => $validated['guest_source'],
+                'order_type' => $validated['order_type'] ?? null,
                 'phone' => $validated['phone'] ?? null,
+                'paid_amount' => $validated['paid_amount'],
                 'deadline' => $validated['deadline'] ?? null,
                 'last_edit' => now(),
-                'status' => $validated['status'],
                 'note' => $validated['note'] ?? null,
             ]);
 
-            $this->rememberGuestPhone($validated['guest_id'], $validated['phone'] ?? null);
+            $newDeadline = $validated['deadline'] ?? null;
+            if ($previousDeadline !== $newDeadline) {
+                $this->recordOrderEvent(
+                    $order,
+                    'deadline_changed',
+                    'Target pengiriman diubah',
+                    "{$order->order_id}: ".($previousDeadline ?? 'Belum ada').' -> '.($newDeadline ?? 'Dihapus'),
+                );
+            }
+
+            $this->syncGuestAddress($guest, $validated);
+            $this->rememberGuestPhone($guest->id, $validated['phone'] ?? null);
 
             $existingItemIds = [];
 
             foreach ($request->items as $index => $item) {
+                $catalogProduct = $this->resolveCatalogProduct($item, $index, $catalogProducts);
+                if ($catalogProduct === null && blank($item['id'] ?? null)) {
+                    $catalogProduct = $this->createCatalogProduct($item);
+                    $catalogProducts->put($catalogProduct->id, $catalogProduct);
+                }
 
                 $subtotal = $item['qty'] * $item['price'];
 
@@ -223,8 +716,68 @@ class OrderController extends Controller
                 if ($itemId) {
 
                     $orderItem = $order->items()->findOrFail($itemId);
+                    $previousItem = $previousItems->get((int) $itemId);
+                    $isLockedProduct = $previousItem !== null && (
+                        in_array($previousItem->status, $lockedStatuses, true)
+                        || in_array($previousItem->factory_status, $lockedStatuses, true)
+                        || (int) $previousItem->qty_completed > 0
+                    );
+
+                    if ($isLockedProduct) {
+                        $existingItemIds[] = $orderItem->id;
+
+                        continue;
+                    }
+
+                    $reworkComment = trim((string) ($item['comment'] ?? ''));
+                    $isReturningToProduction = $previousItem?->status === 'Distribusi'
+                        && $item['status'] === 'Produksi';
+
+                    if ($isReturningToProduction && $reworkComment === '') {
+                        throw ValidationException::withMessages([
+                            "items.$index.comment" => 'Komentar wajib diisi saat produk dikembalikan ke Produksi.',
+                        ]);
+                    }
+
+                    if ((int) $item['qty'] < (int) $orderItem->qty_completed) {
+                        throw ValidationException::withMessages([
+                            "items.$index.qty" => 'Jumlah produk tidak boleh kurang dari jumlah yang sudah dikerjakan.',
+                        ]);
+                    }
+
+                    $hasActiveSubcontractorAssignments = $orderItem->activeSubcontractorAssignments()->exists();
+                    if ((int) $item['qty'] < $orderItem->activeSubcontractedQuantity() + (int) $orderItem->qty_completed) {
+                        throw ValidationException::withMessages([
+                            "items.$index.qty" => 'Jumlah produk tidak boleh kurang dari jumlah yang sudah dikerjakan atau dialokasikan ke subcon.',
+                        ]);
+                    }
+
+                    if (
+                        $hasActiveSubcontractorAssignments
+                        && $item['status'] !== $orderItem->status
+                        && ! ($item['status'] === 'Ready' && $orderItem->status === 'Distribusi')
+                    ) {
+                        throw ValidationException::withMessages([
+                            "items.$index.status" => 'Status keseluruhan produk mengikuti progres Factory dan subcon.',
+                        ]);
+                    }
+
+                    if ($hasActiveSubcontractorAssignments && $item['status'] === 'Ready') {
+                        $allAssignmentsDistributed = $orderItem->activeSubcontractorAssignments()
+                            ->where('status', '!=', 'Distribusi')
+                            ->doesntExist();
+                        $factoryWorkDistributed = $orderItem->factory_quantity === 0
+                            || $orderItem->factory_status === 'Distribusi';
+
+                        if (! $allAssignmentsDistributed || ! $factoryWorkDistributed) {
+                            throw ValidationException::withMessages([
+                                "items.$index.status" => 'Produk hanya dapat berstatus Ready setelah seluruh pekerjaan Factory dan subcon selesai.',
+                            ]);
+                        }
+                    }
 
                     $imagePath = $orderItem->image;
+                    $catalogProductChanged = (int) ($orderItem->product_id ?? 0) !== (int) ($catalogProduct?->id ?? 0);
 
                     if ($request->hasFile("items.$index.image")) {
 
@@ -235,18 +788,84 @@ class OrderController extends Controller
                         $imagePath = $request
                             ->file("items.$index.image")
                             ->store('orders/products', 'public');
+                    } elseif ($catalogProductChanged) {
+                        if ($imagePath) {
+                            Storage::disk('public')->delete($imagePath);
+                        }
+
+                        $imagePath = $catalogProduct !== null
+                            ? $this->copyCatalogImage($catalogProduct)
+                            : null;
+                    }
+
+                    $statusImagePaths = $orderItem->status_evidence_images;
+                    $statusPhotos = $this->statusPhotosFromRequest($request, "items.$index");
+                    if ($statusPhotos !== []) {
+                        $this->deleteStatusImages($statusImagePaths);
+                        $statusImagePaths = $this->storeStatusPhotos($statusPhotos);
+                    }
+                    $statusImagePath = $statusImagePaths[0] ?? null;
+                    $itemStatus = $statusImagePaths !== [] && $item['status'] === 'None'
+                        ? 'Produksi'
+                        : $item['status'];
+
+                    $previousCompleted = (int) $orderItem->qty_completed;
+                    $completedQuantity = $isReturningToProduction ? 0 : $previousCompleted;
+                    if (
+                        $item['status'] === 'Produksi'
+                        && $orderItem->status !== 'Produksi'
+                        && $previousCompleted === $completedQuantity
+                    ) {
+                        $orderItem->qty_progress_updated_at = now();
                     }
 
                     $orderItem->update([
                         'product' => $item['product'],
-                        'category_id' => $item['category_id'] ?? null,
+                        'product_id' => $catalogProduct?->id,
+                        'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                         'qty' => $item['qty'],
                         'price' => $item['price'],
-                        'color' => $item['color'] ?? null,
+                        'dimensions' => $item['dimensions'] ?? $orderItem->dimensions,
+                        'color' => $this->catalogColor($item, $catalogProduct),
                         'source' => $item['source'],
-                        'status' => $item['status'],
+                        'status' => $hasActiveSubcontractorAssignments ? $orderItem->status : $itemStatus,
+                        'factory_status' => $hasActiveSubcontractorAssignments
+                            ? ($itemStatus === 'Ready' ? 'Ready' : $orderItem->factory_status)
+                            : $itemStatus,
+                        'qty_completed' => $completedQuantity,
                         'image' => $imagePath,
+                        'status_image' => $statusImagePath,
+                        'status_images' => $statusImagePaths ?: null,
                     ]);
+                    if ($hasActiveSubcontractorAssignments && $item['status'] === 'Ready') {
+                        $orderItem->update(['status' => 'Ready']);
+                    } elseif ($hasActiveSubcontractorAssignments) {
+                        $orderItem->synchronizeStatusFromWorkAllocations();
+                    }
+
+                    if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
+                        $catalogProduct->update(['price' => $item['price']]);
+                    }
+
+                    if ($previousItem && $previousItem->status !== $item['status']) {
+                        $this->recordOrderEvent(
+                            $order,
+                            'item_status_changed',
+                            'Status produk berubah',
+                            "{$order->order_id} - {$previousItem->product}: {$previousItem->status} -> {$item['status']}",
+                            $orderItem->id,
+                        );
+                    }
+
+                    if ($isReturningToProduction) {
+                        $this->recordOrderEvent(
+                            $order,
+                            'item_rework_requested',
+                            'Produk dikembalikan ke Produksi',
+                            $reworkComment,
+                            $orderItem->id,
+                        );
+                    }
 
                     $existingItemIds[] = $orderItem->id;
 
@@ -258,18 +877,35 @@ class OrderController extends Controller
                         $imagePath = $request
                             ->file("items.$index.image")
                             ->store('orders/products', 'public');
+                    } elseif ($catalogProduct !== null) {
+                        $imagePath = $this->copyCatalogImage($catalogProduct);
                     }
 
+                    if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
+                        $catalogProduct->update(['price' => $item['price']]);
+                    }
                     $newItem = $order->items()->create([
                         'product' => $item['product'],
-                        'category_id' => $item['category_id'] ?? null,
+                        'product_id' => $catalogProduct?->id,
+                        'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
                         'qty' => $item['qty'],
                         'price' => $item['price'],
-                        'color' => $item['color'] ?? null,
+                        'color' => $this->catalogColor($item, $catalogProduct),
                         'source' => $item['source'],
-                        'status' => $item['status'],
+                        'status' => 'None',
+                        'factory_status' => 'None',
                         'image' => $imagePath,
+                        'status_image' => null,
+                        'status_images' => null,
                     ]);
+
+                    $this->recordOrderEvent(
+                        $order,
+                        'item_added',
+                        'Produk ditambahkan',
+                        "{$order->order_id} - {$newItem->product} (status awal: {$newItem->status})",
+                        $newItem->id,
+                    );
 
                     $existingItemIds[] = $newItem->id;
                 }
@@ -284,6 +920,7 @@ class OrderController extends Controller
                 if ($item->image) {
                     Storage::disk('public')->delete($item->image);
                 }
+                $this->deleteStatusImages($item->status_evidence_images);
 
                 $item->delete();
             }
@@ -291,6 +928,7 @@ class OrderController extends Controller
             $order->update([
                 'total_order' => $total,
             ]);
+            $order->synchronizeProductionStatusFromItems();
         });
 
         return redirect()
@@ -300,11 +938,20 @@ class OrderController extends Controller
 
     public function destroy(Order $order)
     {
+        $order->loadMissing('items.activeSubcontractorAssignments');
+
+        if (! $order->canBeDeleted()) {
+            return redirect()
+                ->route('orders.index')
+                ->with('error', 'Order tidak dapat dihapus setelah proses produksi dimulai.');
+        }
+
         foreach ($order->items as $item) {
 
             if ($item->image) {
                 Storage::disk('public')->delete($item->image);
             }
+            $this->deleteStatusImages($item->status_evidence_images);
         }
 
         $order->delete();
@@ -314,8 +961,50 @@ class OrderController extends Controller
             ->with('success', 'Order berhasil dihapus.');
     }
 
+    /**
+     * @return list<UploadedFile>
+     */
+    private function statusPhotosFromRequest(Request $request, string $itemKey): array
+    {
+        $statusPhotos = $request->file("{$itemKey}.status_images", []);
+        $statusPhotos = is_array($statusPhotos) ? $statusPhotos : ($statusPhotos ? [$statusPhotos] : []);
+        $legacyStatusPhoto = $request->file("{$itemKey}.status_image");
+
+        if ($legacyStatusPhoto !== null) {
+            $statusPhotos[] = $legacyStatusPhoto;
+        }
+
+        return array_values(array_filter($statusPhotos));
+    }
+
+    /**
+     * @param  list<UploadedFile>  $statusPhotos
+     * @return list<string>
+     */
+    private function storeStatusPhotos(array $statusPhotos): array
+    {
+        return array_values(array_map(
+            fn ($statusPhoto): string => $statusPhoto->store('orders/status', 'public'),
+            $statusPhotos,
+        ));
+    }
+
+    /**
+     * @param  list<string>  $statusImages
+     */
+    private function deleteStatusImages(array $statusImages): void
+    {
+        foreach ($statusImages as $statusImage) {
+            Storage::disk('public')->delete($statusImage);
+        }
+    }
+
     private function validateOrder(Request $request, ?Order $order = null): array
     {
+        $this->normalizeItemPrices($request);
+        $this->normalizeItemDimensions($request);
+        $this->normalizePaidAmount($request);
+
         $validated = $request->validate([
             'order_id' => [
                 'required',
@@ -323,17 +1012,16 @@ class OrderController extends Controller
                 'max:255',
                 Rule::unique('orders', 'order_id')->ignore($order),
             ],
-            'guest_id' => 'required|integer|exists:guests,id',
+            'guest_id' => 'nullable|integer|exists:guests,id',
             'guest_name' => 'required|string|max:255',
-            'guest_source' => 'required|in:Lokal,Online,Touris',
+            'guest_source' => 'required|string|max:255',
+            'guest_source_custom' => ['nullable', 'required_if:guest_source,__custom', 'string', 'max:255'],
+            'guest_address' => 'nullable|string|max:2000',
+            'order_type' => ['required', Rule::in(['Bali', 'Luar Bali', 'Ekspor'])],
             'phone' => 'nullable|string|max:50',
+            'paid_amount' => ['nullable', 'numeric', 'min:0'],
 
             'deadline' => 'nullable|date',
-
-            'status' => [
-                'required',
-                'in:None,Proses Produksi,Finishing,Selesai,Cancel',
-            ],
 
             'note' => 'nullable|string',
 
@@ -342,6 +1030,14 @@ class OrderController extends Controller
             'items.*.id' => 'nullable|integer',
 
             'items.*.product' => 'required|string|max:255',
+
+            'items.*.product_id' => [
+                'nullable',
+                'integer',
+                'exists:products,id',
+            ],
+
+            'items.*.dimensions' => ['nullable', 'string', 'max:100', 'regex:'.Product::DIMENSIONS_PATTERN],
 
             'items.*.category_id' => [
                 'nullable',
@@ -360,9 +1056,14 @@ class OrderController extends Controller
                 'in:Stock,Order,Mix,Service',
             ],
 
-            'items.*.status' => [
-                'required',
-                'in:None,Produksi,Distribusi,Ready',
+            'items.*.status' => $order === null
+                ? ['sometimes', Rule::in(['None'])]
+                : ['required', Rule::in(['None', 'Produksi', 'Proses Kirim', 'Distribusi', 'Dalam Perjalanan', 'Finishing', 'Packing', 'Ready'])],
+
+            'items.*.comment' => [
+                'nullable',
+                'string',
+                'max:2000',
             ],
 
             'items.*.image' => [
@@ -370,18 +1071,201 @@ class OrderController extends Controller
                 'image',
                 'max:5120',
             ],
+            'items.*.status_image' => $order === null
+                ? ['prohibited']
+                : ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'items.*.status_images' => $order === null
+                ? ['prohibited']
+                : ['nullable', 'array', 'min:1', 'max:10'],
+            'items.*.status_images.*' => $order === null
+                ? ['prohibited']
+                : ['image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
         ], [
-            'order_id.unique' => 'Order ID sudah digunakan.',
+            'order_id.unique' => 'SPK sudah digunakan.',
         ]);
+        foreach ($validated['items'] as $index => $item) {
+            if (($order === null || blank($item['id'] ?? null)) && blank($item['dimensions'] ?? null)) {
+                throw ValidationException::withMessages([
+                    "items.{$index}.dimensions" => 'Ukuran produk wajib diisi dengan format P x L x T.',
+                ]);
+            }
+        }
+
+        if ($validated['guest_source'] === '__custom') {
+            $validated['guest_source'] = trim($validated['guest_source_custom']);
+        }
+        unset($validated['guest_source_custom']);
+
+        $existingStatuses = collect();
+        if ($order !== null) {
+            $itemIds = collect($validated['items'])
+                ->pluck('id')
+                ->filter()
+                ->map(fn ($itemId): int => (int) $itemId);
+            $existingStatuses = $order->items()
+                ->whereIn('id', $itemIds)
+                ->pluck('status', 'id');
+        }
+
+        foreach ($validated['items'] as $index => $item) {
+            if ($order === null) {
+                continue;
+            }
+
+            if (blank($item['id'] ?? null)) {
+                if ($item['status'] !== 'None') {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.status" => 'Produk baru harus dimulai dengan status New.',
+                    ]);
+                }
+
+                if ($this->statusPhotosFromRequest($request, "items.$index") !== []) {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.status_images" => 'Simpan produk terlebih dahulu sebelum mengunggah mockup.',
+                    ]);
+                }
+
+                continue;
+            }
+
+            $previousStatus = isset($item['id'])
+                ? $existingStatuses->get((int) $item['id'])
+                : null;
+
+            if (($previousStatus === null || $previousStatus === 'None')
+                && ! in_array($item['status'], ['None', 'Produksi'], true)) {
+                throw ValidationException::withMessages([
+                    "items.{$index}.status" => 'Produk baru hanya dapat berstatus None atau masuk Produksi setelah mockup diunggah.',
+                ]);
+            }
+
+            if (
+                in_array($item['status'], OrderItem::STATUSES_REQUIRING_PHOTO, true)
+                && $item['status'] !== $previousStatus
+                && $this->statusPhotosFromRequest($request, "items.$index") === []
+            ) {
+                throw ValidationException::withMessages([
+                    "items.{$index}.status_images" => 'Mockup produk wajib diunggah saat status diubah ke Produksi atau Distribusi.',
+                ]);
+            }
+        }
 
         return $validated;
     }
 
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function resolveGuest(array $validated): Guest
+    {
+        if (! empty($validated['guest_id'])) {
+            return Guest::findOrFail($validated['guest_id']);
+        }
+
+        $guestName = trim($validated['guest_name']);
+        $guest = Guest::query()
+            ->whereRaw('LOWER(name) = ?', [mb_strtolower($guestName)])
+            ->first();
+
+        return $guest ?? Guest::create(['name' => $guestName]);
+    }
+
+    private function validatedPaidAmount(array $validated, ?Order $order = null): float
+    {
+        $paidAmount = (float) ($validated['paid_amount'] ?? $order?->paid_amount ?? 0);
+        $orderTotal = array_sum(array_map(
+            fn (array $item): float => (float) $item['qty'] * (float) $item['price'],
+            $validated['items'],
+        ));
+
+        if ($paidAmount > round($orderTotal, 2)) {
+            throw ValidationException::withMessages([
+                'paid_amount' => 'Total pembayaran tidak boleh melebihi total order.',
+            ]);
+        }
+
+        return $paidAmount;
+    }
+
+    private function normalizePaidAmount(Request $request): void
+    {
+        $paidAmount = $request->input('paid_amount');
+
+        if (! is_string($paidAmount)) {
+            return;
+        }
+
+        $paidAmount = trim($paidAmount);
+
+        if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $paidAmount) === 1) {
+            $request->merge(['paid_amount' => str_replace(',', '', $paidAmount)]);
+        }
+    }
+
+    private function normalizeItemPrices(Request $request): void
+    {
+        $items = $request->input('items');
+
+        if (! is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $index => $item) {
+            if (! is_array($item) || ! is_string($item['price'] ?? null)) {
+                continue;
+            }
+
+            $price = trim($item['price']);
+
+            if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d+)?\z/', $price) === 1) {
+                $items[$index]['price'] = str_replace(',', '', $price);
+            }
+        }
+
+        $request->merge(['items' => $items]);
+    }
+
+    private function normalizeItemDimensions(Request $request): void
+    {
+        $items = $request->input('items');
+
+        if (! is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $index => $item) {
+            if (! is_array($item) || ! is_string($item['dimensions'] ?? null)) {
+                continue;
+            }
+
+            $items[$index]['dimensions'] = Product::normalizeDimensions($item['dimensions']);
+        }
+
+        $request->merge(['items' => $items]);
+    }
+
+    private function recordOrderEvent(
+        Order $order,
+        string $type,
+        string $title,
+        string $description,
+        ?int $orderItemId = null,
+    ): void {
+        $order->events()->create([
+            'order_item_id' => $orderItemId,
+            'type' => $type,
+            'title' => $title,
+            'description' => $description,
+            'occurred_at' => now(),
+        ]);
+    }
+
     private function guestOptions()
     {
-        return Guest::with('phones')
+        return Guest::query()
+            ->with('phones')
             ->orderByRaw('LOWER(name)')
-            ->get(['id', 'name']);
+            ->get(['id', 'name', 'address']);
     }
 
     private function rememberGuestPhone(int $guestId, ?string $phone): void
@@ -396,5 +1280,209 @@ class OrderController extends Controller
             'guest_id' => $guestId,
             'phone' => $phone,
         ]);
+    }
+
+    /**
+     * @return list<array{name: string, category_id: int|null, category_name: string|null, dimensions: string|null}>
+     */
+    private function productOptions(): array
+    {
+        $latestItemIds = OrderItem::query()
+            ->selectRaw('MAX(id) AS id')
+            ->groupBy('product')
+            ->orderByDesc('id')
+            ->limit(200)
+            ->pluck('id');
+
+        return OrderItem::query()
+            ->with('category:id,name')
+            ->whereIn('id', $latestItemIds)
+            ->orderByDesc('id')
+            ->get()
+            ->map(fn (OrderItem $item): array => [
+                'name' => $item->product,
+                'category_id' => $item->category_id,
+                'category_name' => $item->category?->name,
+                'dimensions' => $item->dimensions,
+            ])
+            ->all();
+    }
+
+    /**
+     * @return list<array{id: int, name: string, category_id: int|null, category_name: string|null, price: float, dimensions: string|null, colors: list<string>}>
+     */
+    private function catalogProductOptions(): array
+    {
+        return Product::query()
+            ->with('category:id,name')
+            ->orderBy('name')
+            ->get()
+            ->map(fn (Product $product): array => [
+                'id' => $product->id,
+                'name' => $product->name,
+                'category_id' => $product->category_id,
+                'category_name' => $product->category?->name,
+                'price' => (float) $product->price,
+                'dimensions' => $product->dimensions,
+                'colors' => array_values(array_filter($product->colors ?? [], 'is_string')),
+            ])
+            ->all();
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $items
+     * @return EloquentCollection<int, Product>
+     */
+    private function catalogProductsForItems(array $items): EloquentCollection
+    {
+        $productIds = collect($items)
+            ->pluck('product_id')
+            ->filter()
+            ->unique()
+            ->values();
+        $productNames = collect($items)
+            ->pluck('product')
+            ->filter()
+            ->map(fn (string $name): string => mb_strtolower(trim($name)))
+            ->unique()
+            ->values();
+
+        return Product::query()
+            ->where(function (Builder $query) use ($productIds, $productNames): void {
+                if ($productIds->isNotEmpty()) {
+                    $query->whereIn('id', $productIds);
+                }
+
+                if ($productNames->isNotEmpty()) {
+                    $method = $productIds->isNotEmpty() ? 'orWhereIn' : 'whereIn';
+                    $query->{$method}(DB::raw('LOWER(name)'), $productNames);
+                }
+            })
+            ->get()
+            ->keyBy('id');
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @param  EloquentCollection<int, Product>  $catalogProducts
+     */
+    private function resolveCatalogProduct(array $item, int|string $index, EloquentCollection $catalogProducts): ?Product
+    {
+        if (empty($item['product_id'])) {
+            $productName = mb_strtolower(trim($item['product']));
+
+            return $catalogProducts->first(
+                fn (Product $product): bool => mb_strtolower($product->name) === $productName,
+            );
+        }
+
+        $catalogProduct = $catalogProducts->get((int) $item['product_id']);
+        if (! $catalogProduct instanceof Product) {
+            throw ValidationException::withMessages([
+                "items.$index.product_id" => 'Produk katalog tidak ditemukan.',
+            ]);
+        }
+
+        if (mb_strtolower(trim($item['product'])) !== mb_strtolower($catalogProduct->name)) {
+            throw ValidationException::withMessages([
+                "items.$index.product" => 'Nama produk tidak cocok dengan produk katalog yang dipilih.',
+            ]);
+        }
+
+        return $catalogProduct;
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function createCatalogProduct(array $item): Product
+    {
+        $color = trim((string) ($item['color'] ?? ''));
+
+        return Product::create([
+            'name' => trim($item['product']),
+            'category_id' => $item['category_id'] ?? null,
+            'price' => $item['price'],
+            'dimensions' => $item['dimensions'],
+            'colors' => $color === '' ? [] : [$color],
+        ]);
+    }
+
+    private function catalogColor(array $item, ?Product $catalogProduct): ?string
+    {
+        $color = trim((string) ($item['color'] ?? ''));
+        if ($color !== '') {
+            return $color;
+        }
+
+        $colors = $catalogProduct?->colors ?? [];
+
+        return count($colors) === 1 ? $colors[0] : null;
+    }
+
+    private function copyCatalogImage(Product $product): ?string
+    {
+        if ($product->image === null) {
+            return null;
+        }
+
+        $disk = Storage::disk('public');
+        if (! $disk->exists($product->image)) {
+            throw new RuntimeException('Foto produk katalog tidak ditemukan di penyimpanan.');
+        }
+
+        $extension = pathinfo($product->image, PATHINFO_EXTENSION);
+        $imagePath = 'orders/products/'.Str::uuid().($extension !== '' ? '.'.$extension : '');
+
+        if (! $disk->copy($product->image, $imagePath)) {
+            throw new RuntimeException('Foto produk katalog gagal disalin ke order.');
+        }
+
+        return $imagePath;
+    }
+
+    private function syncGuestAddress(Guest $guest, array $validated): void
+    {
+        if (array_key_exists('guest_address', $validated)) {
+            $guest->update([
+                'address' => $validated['guest_address'],
+            ]);
+        }
+    }
+
+    private function applySearch(Builder $query, string $search): Builder
+    {
+        return $query->where(function (Builder $query) use ($search): void {
+            $query->where('order_id', 'like', "%{$search}%")
+                ->orWhere('guest_name', 'like', "%{$search}%")
+                ->orWhere('phone', 'like', "%{$search}%")
+                ->orWhereHas('guest', fn (Builder $guestQuery) => $guestQuery->where('address', 'like', "%{$search}%"))
+                ->orWhereHas('items', function (Builder $itemQuery) use ($search): void {
+                    $itemQuery->where('product', 'like', "%{$search}%")
+                        ->orWhereHas('category', fn (Builder $categoryQuery) => $categoryQuery->where('name', 'like', "%{$search}%"));
+                });
+        });
+    }
+
+    private function applyProductionSearch(Builder $query, string $search, ?array $factoryItemStatuses = null): Builder
+    {
+        return $query->where(function (Builder $query) use ($search, $factoryItemStatuses): void {
+            $query->where('order_id', 'like', "%{$search}%")
+                ->orWhereHas('items', fn (Builder $itemQuery) => $itemQuery
+                    ->where('product', 'like', "%{$search}%")
+                    ->when(
+                        $factoryItemStatuses !== null,
+                        fn (Builder $itemQuery) => $itemQuery->whereIn('factory_status', $factoryItemStatuses),
+                    ));
+        });
+    }
+
+    private function safeCsvValue(?string $value): string
+    {
+        $value = (string) $value;
+
+        return preg_match('/^[\t\r ]*[=+\-@]/', $value) === 1
+            ? "'".$value
+            : $value;
     }
 }

@@ -42,4 +42,37 @@ class UserFactory extends Factory
             'email_verified_at' => null,
         ]);
     }
+
+    public function admin(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'is_admin' => true,
+            'role' => User::ROLE_ADMIN,
+            'business_unit' => User::UNIT_BALI,
+            'accessible_units' => [User::UNIT_BALI],
+            'is_active' => true,
+        ]);
+    }
+
+    public function owner(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'is_admin' => true,
+            'role' => User::ROLE_OWNER,
+            'business_unit' => null,
+            'is_active' => true,
+        ]);
+
+    }
+
+    public function factoryAdmin(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'is_admin' => true,
+            'role' => User::ROLE_ADMIN,
+            'business_unit' => User::UNIT_FACTORY,
+            'accessible_units' => [User::UNIT_FACTORY],
+            'is_active' => true,
+        ]);
+    }
 }

@@ -1,5 +1,10 @@
 <?php
 
+use App\Http\Middleware\EnsureAdmin;
+use App\Http\Middleware\EnsureBaliOrOwner;
+use App\Http\Middleware\EnsureMenuAccess;
+use App\Http\Middleware\EnsureOwner;
+use App\Http\Middleware\LogAdminActivity;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -11,7 +16,13 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->alias([
+            'admin' => EnsureAdmin::class,
+            'owner' => EnsureOwner::class,
+            'bali' => EnsureBaliOrOwner::class,
+            'menu' => EnsureMenuAccess::class,
+            'activity' => LogAdminActivity::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

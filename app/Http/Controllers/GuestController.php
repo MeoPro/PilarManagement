@@ -3,7 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\Guest;
+use App\Models\Order;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\View\View;
 
 class GuestController extends Controller
 {
@@ -47,8 +51,21 @@ class GuestController extends Controller
             ->with(['phones', 'orders' => function ($query) {
                 $query->select(['id', 'guest_id', 'order_id', 'phone']);
             }])
+            ->addSelect([
+                'debt_amount' => Order::query()
+                    ->selectRaw('COALESCE(SUM(orders.total_order - orders.paid_amount), 0)')
+                    ->whereColumn('orders.guest_id', 'guests.id')
+                    ->where('orders.status', 'Selesai')
+                    ->whereColumn('orders.paid_amount', '<', 'orders.total_order'),
+            ])
+            ->addSelect([
+                'unpaid_amount' => Order::query()
+                    ->selectRaw('COALESCE(SUM(CASE WHEN orders.total_order > orders.paid_amount THEN orders.total_order - orders.paid_amount ELSE 0 END), 0)')
+                    ->whereColumn('orders.guest_id', 'guests.id')
+                    ->where('orders.status', '!=', 'Cancel'),
+            ])
             ->withCount('orders')
-            ->withSum('orders', 'total_order')
+            ->withSum(['orders' => fn ($query) => $query->where('status', '!=', 'Cancel')], 'total_order')
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($query) use ($search) {
                     $query->where('name', 'like', "%{$search}%")
@@ -67,7 +84,75 @@ class GuestController extends Controller
         };
 
         $guests = $guests->paginate(15)->withQueryString();
+        $totalGuestDebt = Order::query()
+            ->where('status', 'Selesai')
+            ->whereColumn('paid_amount', '<', 'total_order')
+            ->selectRaw('COALESCE(SUM(total_order - paid_amount), 0) AS total_debt')
+            ->value('total_debt');
 
-        return view('guests.index', compact('guests', 'search', 'sort', 'sortOptions'));
+        return view('guests.index', compact('guests', 'search', 'sort', 'sortOptions', 'totalGuestDebt'));
+    }
+
+    public function show(Guest $guest): View
+    {
+        $guest->load('phones');
+        $guest->loadCount('orders');
+        $guest->loadSum(['orders' => fn ($query) => $query->where('status', '!=', 'Cancel')], 'total_order');
+        $guest->debt_amount = $guest->orders()
+            ->where('status', 'Selesai')
+            ->whereColumn('paid_amount', '<', 'total_order')
+            ->selectRaw('COALESCE(SUM(total_order - paid_amount), 0) AS total_debt')
+            ->value('total_debt');
+        $orders = $guest->orders()
+            ->where('status', '!=', 'Cancel')
+            ->with('items.category')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->paginate(15);
+
+        return view('guests.show', compact('guest', 'orders'));
+    }
+
+    public function edit(Guest $guest): View
+    {
+        $guest->load('phones');
+
+        return view('guests.edit', compact('guest'));
+    }
+
+    public function update(Request $request, Guest $guest): RedirectResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'address' => ['nullable', 'string', 'max:2000'],
+            'phones' => ['nullable', 'array'],
+            'phones.*' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        DB::transaction(function () use ($guest, $validated): void {
+            $guest->update([
+                'name' => trim($validated['name']),
+                'address' => filled($validated['address'] ?? null) ? trim($validated['address']) : null,
+            ]);
+
+            $guest->phones()->delete();
+            $phoneEntries = collect($validated['phones'] ?? [])
+                ->map(fn (?string $phone): string => trim($phone ?? ''))
+                ->filter(fn (string $phone): bool => $phone !== '')
+                ->unique()
+                ->values();
+
+            foreach ($phoneEntries as $phone) {
+                $guest->phones()->create(['phone' => $phone]);
+            }
+
+            $guest->orders()->update([
+                'guest_name' => trim($validated['name']),
+            ]);
+        });
+
+        return redirect()
+            ->route('guests.show', $guest)
+            ->with('success', 'Data tamu berhasil diperbarui.');
     }
 }
