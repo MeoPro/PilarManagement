@@ -622,19 +622,9 @@
             </div>
 
             <div class="form-group order-payment-field order-form-payment-field">
-                <label for="paid_amount">Total pembayaran / DP yang sudah diterima (Rp)</label>
-                <input
-                    id="paid_amount"
-                    type="text"
-                    inputmode="decimal"
-                    class="price-input"
-                    data-money-input
-                    name="paid_amount"
-                    value="{{ old('paid_amount', number_format((float) $order->paid_amount, 0, '.', ',')) }}"
-                    autocomplete="off"
-                    oninput="formatPriceInput(this)"
-                >
-                <small>Persentase DP dan sisa pembayaran dihitung dari total order.</small>
+                <strong>Sudah dibayar: Rp {{ number_format((float) $order->paid_amount, 0, '.', ',') }}</strong>
+                <small>Riwayat dan cicilan baru dikelola dari halaman detail order agar tanggal setiap pembayaran tercatat.</small>
+                <a class="btn" href="{{ route('orders.show', $order) }}">Kelola pembayaran</a>
             </div>
 
         </div>
@@ -649,6 +639,13 @@
 
 </div>
 
+<section class="card order-discussion" id="order-discussion">
+    <div>
+        <h2>Diskusi Order</h2>
+        <p class="muted">Komentar dapat diubah oleh penulisnya dari detail maupun halaman edit order.</p>
+    </div>
+    @include('orders.partials.comment-list', ['order' => $order])
+</section>
 
 <datalist id="guest-options">
     @foreach($guests as $guest)
@@ -1684,9 +1681,6 @@
     document.querySelectorAll('[name*="[price]"]').forEach(input => {
         formatPriceInput(input, true);
     });
-
-    const paidAmountInput = document.getElementById('paid_amount');
-    formatPriceInput(paidAmountInput);
 
     productIndex = document.querySelectorAll('#product-container tr').length;
     calculateTotal();

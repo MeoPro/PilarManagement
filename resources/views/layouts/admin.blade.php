@@ -27,6 +27,7 @@
         $unitMenus = [
             'calendar' => ['group' => 'Operasional', 'label' => 'Kalender Order', 'route' => 'calendar.index', 'icon' => 'calendar', 'active' => 'calendar.index'],
             'orders' => ['group' => 'Orderan', 'label' => 'Daftar Order', 'route' => 'orders.index', 'icon' => 'orders', 'active' => 'orders.*'],
+            'revenue' => ['group' => 'Finance', 'label' => 'Omzet', 'route' => 'revenue.index', 'icon' => 'reports', 'active' => 'revenue.*'],
             'products' => ['group' => 'Operasional', 'label' => 'Katalog Produk', 'route' => 'products.index', 'icon' => 'products', 'active' => 'products.*'],
             'order_products' => ['group' => 'Orderan', 'label' => 'Produk Orderan', 'route' => 'order-products.index', 'icon' => 'orders', 'active' => 'order-products.*'],
             'subcontractor_products' => ['group' => 'Operasional', 'label' => 'Produk Subcon', 'route' => 'subcontractor-products.index', 'icon' => 'subcontractors', 'active' => 'subcontractor-products.*'],

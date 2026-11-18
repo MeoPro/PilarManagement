@@ -29,6 +29,8 @@ class OrderItem extends Model
         'status_image',
         'status_images',
         'factory_drawing_image',
+        'factory_sale_price',
+        'factory_handover_at',
         'packed_quantity',
         'quality_good_quantity',
         'quality_damaged_quantity',
@@ -37,6 +39,8 @@ class OrderItem extends Model
 
     protected $casts = [
         'price' => 'decimal:2',
+        'factory_sale_price' => 'decimal:2',
+        'factory_handover_at' => 'datetime',
         'qty_progress_updated_at' => 'datetime',
         'status_images' => 'array',
     ];

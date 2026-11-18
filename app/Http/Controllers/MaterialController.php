@@ -61,7 +61,7 @@ class MaterialController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'unit' => ['nullable', 'string', 'max:50'],
             'unit_price' => ['required', 'numeric', 'min:0'],
-            'initial_stock' => ['nullable', 'numeric', 'min:0', 'max:999999999'],
+            'initial_stock' => ['required', 'numeric', 'gt:0', 'max:999999999'],
         ]);
 
         $unit = $request->user()->isOwner()
@@ -130,17 +130,14 @@ class MaterialController extends Controller
     public function update(Request $request, Material $material): RedirectResponse
     {
         $this->authorizeMaterialUnit($request->user(), $material);
-        $this->normalizeMoney($request, 'unit_price');
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'unit' => ['nullable', 'string', 'max:50'],
-            'unit_price' => ['required', 'numeric', 'min:0'],
         ]);
 
         $material->update([
             'name' => trim($validated['name']),
             'unit' => filled($validated['unit'] ?? null) ? trim($validated['unit']) : null,
-            'unit_price' => $validated['unit_price'],
         ]);
 
         return redirect()
@@ -169,7 +166,7 @@ class MaterialController extends Controller
             $quantity = (float) $validated['quantity'];
             $unitPrice = $validated['type'] === 'in'
                 ? (float) $validated['unit_price']
-                : (float) $lockedMaterial->unit_price;
+                : $this->weightedAverageUnitPrice($lockedMaterial);
 
             if ($validated['type'] === 'out') {
                 $availableStock = (float) $lockedMaterial->transactions()
@@ -240,5 +237,40 @@ class MaterialController extends Controller
         if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $value) === 1) {
             $request->merge([$field => str_replace(',', '', $value)]);
         }
+    }
+
+    private function weightedAverageUnitPrice(Material $material): float
+    {
+        $quantityOnHand = 0.0;
+        $inventoryValue = 0.0;
+
+        foreach ($material->transactions()->orderBy('created_at')->orderBy('id')->cursor() as $transaction) {
+            $quantity = (float) $transaction->quantity;
+
+            if ($transaction->type === 'in') {
+                $quantityOnHand += $quantity;
+                $inventoryValue += $quantity * (float) $transaction->unit_price;
+
+                continue;
+            }
+
+            if ($quantity > $quantityOnHand + 0.001) {
+                throw ValidationException::withMessages([
+                    'quantity' => 'Riwayat stok material tidak konsisten. Periksa transaksi stok sebelum mencatat pemakaian.',
+                ]);
+            }
+
+            $averageUnitPrice = $quantityOnHand > 0 ? $inventoryValue / $quantityOnHand : 0;
+            $inventoryValue -= $quantity * $averageUnitPrice;
+            $quantityOnHand -= $quantity;
+        }
+
+        if ($quantityOnHand <= 0) {
+            throw ValidationException::withMessages([
+                'quantity' => 'Tidak ada stok dengan harga rata-rata yang dapat dipakai.',
+            ]);
+        }
+
+        return round($inventoryValue / $quantityOnHand, 2);
     }
 }

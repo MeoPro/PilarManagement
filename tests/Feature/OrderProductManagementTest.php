@@ -143,6 +143,7 @@ test('product queue requires a photo before moving a product to distribution', f
     $this->actingAs($factoryAdmin)
         ->from(route('order-products.index'))
         ->patch(route('order-products.factory-drawing.update', $item), [
+            'factory_sale_price' => '10,000',
         ])
         ->assertSessionHasErrors('factory_drawing_image');
 
@@ -315,11 +316,13 @@ test('Factory product queue requires the second work drawing uploaded from order
     $this->get(route('orders.show', $order))
         ->assertSeeText('New')
         ->assertSeeText('Unggah gambar kerja tukang PF')
-        ->assertSee('name="factory_drawing_image"', false);
+        ->assertSee('name="factory_drawing_image"', false)
+        ->assertSee('name="factory_sale_price"', false);
 
     $this->from(route('orders.show', $order))
         ->patch(route('order-products.factory-drawing.update', $item), [
             'factory_drawing_image' => UploadedFile::fake()->create('factory-drawing.jpg', 100, 'image/jpeg'),
+            'factory_sale_price' => '10,000',
         ])
         ->assertRedirect(route('orders.show', $order));
 

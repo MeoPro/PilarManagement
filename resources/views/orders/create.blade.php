@@ -267,7 +267,7 @@
             </div>
 
             <div class="form-group order-payment-field order-form-payment-field">
-                <label for="paid_amount">Total pembayaran / DP yang sudah diterima (Rp)</label>
+                <label for="paid_amount">Pembayaran awal / DP yang sudah diterima (Rp)</label>
                 <input
                     id="paid_amount"
                     type="text"
@@ -279,7 +279,15 @@
                     autocomplete="off"
                     oninput="formatPriceInput(this)"
                 >
-                <small>Persentase DP dan sisa pembayaran dihitung dari total order.</small>
+                <label for="payment_date">Tanggal pembayaran awal</label>
+                <input
+                    id="payment_date"
+                    type="date"
+                    name="payment_date"
+                    value="{{ old('payment_date', now(auth()->user()->timezone())->toDateString()) }}"
+                    max="{{ now(auth()->user()->timezone())->toDateString() }}"
+                >
+                <small>DP ini dicatat sebagai transaksi pada tanggal yang dipilih. Cicilan berikutnya dapat ditambahkan dari detail order.</small>
             </div>
 
         </div>

@@ -108,6 +108,43 @@ class OrderCommentController extends Controller
             ->with('success', 'Komentar berhasil dikirim.');
     }
 
+    public function update(Request $request, Order $order, OrderComment $comment): JsonResponse|RedirectResponse
+    {
+        abort_unless($comment->user_id === $request->user()->id, 403);
+
+        $validated = $request->validate([
+            'body' => ['required', 'string', 'max:5000'],
+        ]);
+
+        DB::transaction(function () use ($comment, $validated): void {
+            $comment->update([
+                'body' => trim($validated['body']),
+            ]);
+        });
+
+        $comment->refresh()->load(['author', 'replies.author']);
+        $comment->loadCount(['readRecipients', 'replies']);
+
+        if ($request->expectsJson()) {
+            $html = $comment->parent_id === null
+                ? view('orders.partials.comment-thread', compact('comment', 'order'))->render()
+                : view('orders.partials.comment-entry', compact('comment'))->render();
+
+            return response()->json([
+                'comment' => [
+                    'id' => $comment->id,
+                    'parent_id' => $comment->parent_id,
+                ],
+                'html' => $html,
+                'message' => 'Komentar berhasil diperbarui.',
+            ]);
+        }
+
+        return redirect()
+            ->route('orders.show', $order)
+            ->with('success', 'Komentar berhasil diperbarui.');
+    }
+
     public function reminders(Request $request): JsonResponse
     {
         $recipients = OrderCommentRecipient::query()

@@ -131,6 +131,67 @@ test('order status tabs return only filtered results for asynchronous requests',
         ->assertDontSee('<!doctype html>', false);
 });
 
+test('order summary counts this month and archives paid completed orders under the completed tab', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    $admin = User::factory()->admin()->create(['accessible_menus' => ['orders']]);
+    $archivedOrder = Order::create([
+        'order_id' => 'ORDER-ARCHIVED-PAID',
+        'guest_name' => 'Archived Paid Guest',
+        'total_order' => 300000,
+        'paid_amount' => 300000,
+        'status' => 'Selesai',
+    ]);
+    $archivedOrder->forceFill(['created_at' => '2026-10-31 23:59:00'])->save();
+    $unpaidCompletedOrder = Order::create([
+        'order_id' => 'ORDER-OLD-UNPAID',
+        'guest_name' => 'Old Unpaid Guest',
+        'total_order' => 400000,
+        'paid_amount' => 100000,
+        'status' => 'Selesai',
+    ]);
+    $unpaidCompletedOrder->forceFill(['created_at' => '2026-10-31 23:59:00'])->save();
+    $previousMonthActiveOrder = Order::create([
+        'order_id' => 'ORDER-OLD-ACTIVE',
+        'guest_name' => 'Old Active Guest',
+        'total_order' => 100000,
+        'status' => 'Proses Produksi',
+    ]);
+    $previousMonthActiveOrder->forceFill(['created_at' => '2026-10-31 23:59:00'])->save();
+    $currentMonthCompletedOrder = Order::create([
+        'order_id' => 'ORDER-CURRENT-PAID',
+        'guest_name' => 'Current Paid Guest',
+        'total_order' => 200000,
+        'paid_amount' => 200000,
+        'status' => 'Selesai',
+    ]);
+    $currentMonthActiveOrder = Order::create([
+        'order_id' => 'ORDER-CURRENT-ACTIVE',
+        'guest_name' => 'Current Active Guest',
+        'total_order' => 100000,
+        'status' => 'None',
+    ]);
+
+    $response = $this->actingAs($admin)
+        ->get(route('orders.index'));
+
+    $response
+        ->assertSeeText('Total Order Bulan Ini')
+        ->assertSeeText($currentMonthCompletedOrder->order_id)
+        ->assertSeeText($currentMonthActiveOrder->order_id)
+        ->assertSeeText($unpaidCompletedOrder->order_id)
+        ->assertSeeText($previousMonthActiveOrder->order_id)
+        ->assertDontSeeText($archivedOrder->order_id);
+
+    $content = $response->getContent();
+    expect(preg_match('/<span>Total Order Bulan Ini<\/span>\s*<strong>2<\/strong>/', $content))->toBe(1)
+        ->and(preg_match('/class="order-status-dot"><\/span>\s*Semua\s*<span class="order-status-count">4<\/span>/', $content))->toBe(1);
+
+    $this->get(route('orders.index', ['status' => 'Selesai']))
+        ->assertSeeText($archivedOrder->order_id)
+        ->assertSeeText($unpaidCompletedOrder->order_id)
+        ->assertSeeText($currentMonthCompletedOrder->order_id);
+});
+
 test('daftar tamu menampilkan detail order tersimpan dan mendukung pencarian', function () {
     $guest = Guest::create(['name' => 'Guest Directory Match']);
     $guest->phones()->create(['phone' => '08123456789']);
@@ -487,7 +548,7 @@ test('PF dapat menolak pengajuan deadline tanpa mengubah tanggal aktif', functio
         ->toContain('Belum dapat dipenuhi.');
 });
 
-test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', function () {
+test('pembayaran awal dan cicilan order tersimpan sesuai tanggal dan batas tagihan', function () {
     $guest = Guest::create(['name' => 'Payment Guest']);
     $payload = [
         'order_id' => 'ORD-PAYMENT',
@@ -497,6 +558,7 @@ test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', f
         'order_type' => 'Bali',
         'status' => 'None',
         'paid_amount' => '250,000',
+        'payment_date' => '2026-03-15',
         'items' => [[
             'product' => 'Payment Product',
             'dimensions' => '10x10x10',
@@ -511,6 +573,10 @@ test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', f
         ->assertRedirect(route('orders.index'));
 
     $order = Order::where('order_id', 'ORD-PAYMENT')->firstOrFail();
+    expect($order->payments()
+        ->where('amount', 250000)
+        ->whereDate('paid_at', '2026-03-15')
+        ->exists())->toBeTrue();
     $order->items()->firstOrFail()->update([
         'status' => 'Ready',
         'factory_status' => 'Ready',
@@ -522,21 +588,20 @@ test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', f
 
     $this->get(route('orders.index', ['search' => 'ORD-PAYMENT']))
         ->assertSee('50,0%')
-        ->assertSee('Sisa Rp 250,000')
-        ->assertSee('Belum lunas');
+        ->assertSee('Sisa Rp 250,000');
 
-    $this->put(route('orders.update', $order), array_merge($payload, [
-        'status' => 'Selesai',
-        'paid_amount' => '500,001',
-        'items' => [[
-            'id' => $order->items()->value('id'),
-            'product' => 'Payment Product',
-            'qty' => 2,
-            'price' => '250,000',
-            'source' => 'Order',
-            'status' => 'Ready',
-        ]],
-    ]))->assertSessionHasErrors('paid_amount');
+    $this->post(route('orders.payments.store', $order), [
+        'amount' => '250,001',
+        'paid_at' => '2026-03-16',
+    ])->assertSessionHasErrors('amount');
+
+    expect((float) $order->fresh()->paid_amount)->toBe(250000.0);
+    $this->assertDatabaseCount('order_payments', 1);
+
+    $this->post(route('orders.payments.store', $order), [
+        'amount' => '250,000',
+        'paid_at' => '2026-03-16',
+    ])->assertRedirect(route('orders.show', $order));
 
     $this->put(route('orders.update', $order), [
         'order_id' => 'ORD-PAYMENT',
@@ -544,7 +609,6 @@ test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', f
         'guest_name' => $guest->name,
         'guest_source' => 'Lokal',
         'order_type' => 'Bali',
-        'paid_amount' => '500,000',
         'status' => 'Selesai',
         'items' => [[
             'id' => $order->items()->value('id'),
@@ -561,6 +625,7 @@ test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', f
         'paid_amount' => 500000,
         'status' => 'Selesai',
     ]);
+    $this->assertDatabaseCount('order_payments', 2);
     expect($order->fresh()->is_paid)->toBeTrue()
         ->and($order->fresh()->is_debt)->toBeFalse();
 });
@@ -1534,6 +1599,7 @@ test('order changes to production when every product enters production', functio
     $this->actingAs($factoryAdmin)
         ->patch(route('order-products.factory-drawing.update', $firstItem), [
             'factory_drawing_image' => UploadedFile::fake()->create('chair-work-drawing.jpg', 100, 'image/jpeg'),
+            'factory_sale_price' => '100,000',
         ])
         ->assertRedirect();
 
@@ -1541,6 +1607,7 @@ test('order changes to production when every product enters production', functio
 
     $this->patch(route('order-products.factory-drawing.update', $secondItem), [
         'factory_drawing_image' => UploadedFile::fake()->create('table-work-drawing.jpg', 100, 'image/jpeg'),
+        'factory_sale_price' => '100,000',
     ])->assertRedirect();
 
     $this->assertDatabaseHas('orders', [
@@ -1888,12 +1955,12 @@ test('Stock items do not block made-to-order items from starting production', fu
     expect($order->fresh()->status)->toBe('Proses Produksi');
 });
 
-test('mixed ready Stock and made-to-order items keep the order in finishing', function () {
+test('mixed Stock and made-to-order items complete the order when all are ready', function () {
     $order = Order::create([
         'order_id' => 'MIXED-STOCK-READY-STATUS',
         'guest_name' => 'Mixed Stock Ready Guest',
         'total_order' => 200,
-        'status' => 'Selesai',
+        'status' => 'Distribusi',
     ]);
     $order->items()->createMany([
         [
@@ -1914,7 +1981,7 @@ test('mixed ready Stock and made-to-order items keep the order in finishing', fu
 
     $order->synchronizeProductionStatusFromItems();
 
-    expect($order->fresh()->status)->toBe('Finishing');
+    expect($order->fresh()->status)->toBe('Selesai');
 });
 
 test('mixed ready and production items keep the order in production', function () {
@@ -2346,8 +2413,29 @@ test('status order otomatis menjadi selesai saat semua produk ready', function (
     $response->assertRedirect(route('orders.index'));
     $response->assertSessionDoesntHaveErrors();
 
-    expect($order->fresh()->status)->toBe('Finishing')
+    expect($order->fresh()->status)->toBe('Selesai')
         ->and($order->fresh()->guest_source)->toBe('Touris')
         ->and($firstItem->fresh()->status)->toBe('Ready')
         ->and($secondItem->fresh()->status)->toBe('Ready');
+});
+
+test('order Stock berubah menjadi selesai saat semua produknya ready', function () {
+    $order = Order::create([
+        'order_id' => 'STOCK-ORDER-COMPLETE',
+        'guest_name' => 'Stock Completion Guest',
+        'total_order' => 100,
+        'status' => 'Distribusi',
+    ]);
+    $order->items()->create([
+        'product' => 'Ready Stock Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+        'factory_status' => 'Ready',
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Selesai');
 });

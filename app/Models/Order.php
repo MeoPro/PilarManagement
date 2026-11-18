@@ -19,6 +19,7 @@ class Order extends Model
         'phone',
         'total_order',
         'paid_amount',
+        'opening_paid_amount',
         'deadline',
         'pending_deadline',
         'pending_deadline_reason',
@@ -40,6 +41,7 @@ class Order extends Model
         'last_edit' => 'datetime',
         'total_order' => 'decimal:2',
         'paid_amount' => 'decimal:2',
+        'opening_paid_amount' => 'decimal:2',
     ];
 
     protected static function booted(): void
@@ -80,6 +82,11 @@ class Order extends Model
     public function items(): HasMany
     {
         return $this->hasMany(OrderItem::class);
+    }
+
+    public function payments(): HasMany
+    {
+        return $this->hasMany(OrderPayment::class)->latest('paid_at')->latest('id');
     }
 
     public function events(): HasMany
@@ -293,12 +300,14 @@ class Order extends Model
             (int) $itemStatuses->new_order_items > 0 => 'None',
             (int) $itemStatuses->production_items > 0 => 'Proses Produksi',
             (int) $itemStatuses->finishing_items > 0 => 'Finishing',
-            $hasMixedStockItems && (int) $itemStatuses->service_items === 0 => 'Finishing',
+            $hasMixedStockItems
+                && (int) $itemStatuses->service_items === 0
+                && (int) $itemStatuses->ready_items < (int) $itemStatuses->total_items => 'Finishing',
             (int) $itemStatuses->packing_items > 0 => 'Packing',
             (int) $itemStatuses->service_items > 0 => 'Service',
+            (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
             (int) $itemStatuses->distributed_order_items > 0 => 'Distribusi',
             (int) $itemStatuses->stock_items > 0 => 'Distribusi',
-            (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
             default => null,
         };
 

@@ -22,9 +22,11 @@ use App\Http\Controllers\KanbanTaskController;
 use App\Http\Controllers\MaterialController;
 use App\Http\Controllers\OrderCommentController;
 use App\Http\Controllers\OrderController;
+use App\Http\Controllers\OrderPaymentController;
 use App\Http\Controllers\OrderProductController;
 use App\Http\Controllers\PieceworkAssignmentController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\RevenueController;
 use App\Http\Controllers\SubcontractorAssignmentController;
 use App\Http\Controllers\SubcontractorController;
 use App\Http\Controllers\SubcontractorProductController;
@@ -107,6 +109,12 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
         ->middleware('menu:orders')
         ->whereNumber('order')
         ->name('orders.comments.store');
+    Route::patch('/orders/{order}/comments/{comment}', [OrderCommentController::class, 'update'])
+        ->middleware('menu:orders')
+        ->whereNumber('order')
+        ->whereNumber('comment')
+        ->scopeBindings()
+        ->name('orders.comments.update');
 
     Route::get('/', function () {
         return redirect()->route('admin.index');
@@ -155,6 +163,9 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
             Route::resource('orders', OrderController::class)
                 ->except(['index', 'show'])
                 ->names('orders');
+            Route::post('/orders/{order}/payments', [OrderPaymentController::class, 'store'])
+                ->whereNumber('order')
+                ->name('orders.payments.store');
         });
 
         Route::middleware('menu:guests')->group(function () {
@@ -189,6 +200,9 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
     Route::middleware('menu:expenses')->group(function () {
         Route::resource('expenses', ExpenseController::class);
     });
+    Route::get('/revenue', [RevenueController::class, 'index'])
+        ->middleware('menu:revenue')
+        ->name('revenue.index');
 
     Route::middleware('menu:employees')->group(function () {
         Route::get('/admin/cashbond', [CashbondAdvanceController::class, 'index'])

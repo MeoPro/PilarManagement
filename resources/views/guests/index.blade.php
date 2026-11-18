@@ -28,9 +28,19 @@
         @endif
     </div>
 
-    <section class="guest-debt-summary">
-        <span>Total hutang dari order yang selesai</span>
-        <strong>Rp {{ number_format((float) $totalGuestDebt, 0, ',', '.') }}</strong>
+    <section class="guest-summary-grid" aria-label="Ringkasan tamu">
+        <article class="guest-debt-summary">
+            <span>Total hutang dari order yang selesai</span>
+            <strong>Rp {{ number_format($totalGuestDebt, 0, ',', '.') }}</strong>
+        </article>
+        <article class="guest-debt-summary">
+            <span>Jumlah tamu berhutang</span>
+            <strong>{{ number_format($indebtedGuestCount, 0, ',', '.') }} tamu</strong>
+        </article>
+        <article class="guest-debt-summary">
+            <span>Total semua tamu</span>
+            <strong>{{ number_format($totalGuestCount, 0, ',', '.') }} tamu</strong>
+        </article>
     </section>
 
     <form action="{{ route('guests.index') }}" method="GET" class="search-form">

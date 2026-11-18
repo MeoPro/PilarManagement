@@ -43,6 +43,10 @@ class OrderController extends Controller
         $user = $request->user();
         $canManageSales = $user->isSalesWorkflow();
         $factoryWorkflow = $user->isFactoryWorkflow();
+        $monthStart = now($user->timezone())->startOfMonth();
+        $nextMonthStart = $monthStart->copy()->addMonth();
+        $monthStartDate = $monthStart->toDateString();
+        $nextMonthStartDate = $nextMonthStart->toDateString();
         $factoryItemStatuses = self::FACTORY_ORDER_ITEM_STATUSES;
         $productionSearchItemStatuses = $factoryWorkflow ? $factoryItemStatuses : null;
         $search = trim((string) $request->query('search', ''));
@@ -105,7 +109,22 @@ class OrderController extends Controller
                 : [
                     'items' => fn ($query) => $query
                         ->when($factoryWorkflow, fn (Builder $query) => $this->applyFactoryItemVisibility($query))
-                        ->select('id', 'order_id', 'product', 'category_id', 'qty', 'qty_completed', 'factory_status', 'color', 'source', 'status', 'image')
+                        ->select(
+                            'id',
+                            'order_id',
+                            'product',
+                            'category_id',
+                            'qty',
+                            'qty_completed',
+                            'factory_status',
+                            'factory_sale_price',
+                            'factory_handover_at',
+                            'factory_drawing_image',
+                            'color',
+                            'source',
+                            'status',
+                            'image',
+                        )
                         ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
                         ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
                         ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
@@ -119,6 +138,10 @@ class OrderController extends Controller
                 ? $this->applySearch($query, $search)
                 : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
             ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType))
+            ->when(
+                $statusFilter !== 'Selesai',
+                fn (Builder $query): Builder => $this->excludeArchivedCompletedOrders($query, $monthStartDate),
+            )
             ->when($statusFilter !== '', fn (Builder $query) => $query->where('status', $statusFilter))
             ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', ['Selesai'])
             ->orderByRaw(
@@ -149,9 +172,13 @@ class OrderController extends Controller
         }
 
         $orderStats = Order::query()->selectRaw(
-            'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
+            'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
             ['None', 'None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai'],
         )->first();
+        $orderStats->total_orders = Order::query()
+            ->whereDate('created_at', '>=', $monthStartDate)
+            ->whereDate('created_at', '<', $nextMonthStartDate)
+            ->count();
 
         if ($canManageSales) {
             $orderStats->total_revenue = Order::query()
@@ -168,6 +195,10 @@ class OrderController extends Controller
                 fn (Builder $query) => $query->whereHas('items', fn (Builder $itemQuery) => $this->applyFactoryItemVisibility($itemQuery)),
             )
             ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType));
+        $allOrdersCount = $this->excludeArchivedCompletedOrders(
+            clone $statusCountsQuery,
+            $monthStartDate,
+        )->count();
         $statusCounts = $statusCountsQuery
             ->selectRaw('status, COUNT(*) AS status_count')
             ->groupBy('status')
@@ -194,6 +225,7 @@ class OrderController extends Controller
             'statusFilter',
             'statusOptions',
             'statusCounts',
+            'allOrdersCount',
             'statusTabs',
             'orderStats',
             'canManageSales',
@@ -360,6 +392,14 @@ class OrderController extends Controller
             $order->update([
                 'total_order' => $total,
             ]);
+            if ($validated['paid_amount'] > 0) {
+                $order->payments()->create([
+                    'amount' => $validated['paid_amount'],
+                    'paid_at' => $validated['payment_date'] ?? today($request->user()->timezone())->toDateString(),
+                    'note' => 'Pembayaran awal saat order dibuat',
+                    'received_by_id' => $request->user()->id,
+                ]);
+            }
             $order->synchronizeProductionStatusFromItems();
         });
 
@@ -467,6 +507,7 @@ class OrderController extends Controller
 
         if ($salesWorkflow) {
             $order->load([
+                'payments.receivedBy:id,name',
                 'items.pieceworkItems.employee',
                 'items.pieceworkItems.attendance.employee',
                 'items.pieceworkAssignments' => fn ($query) => $query
@@ -476,24 +517,7 @@ class OrderController extends Controller
             ]);
         }
 
-        OrderCommentRecipient::query()
-            ->where('user_id', $user->id)
-            ->whereNull('read_at')
-            ->whereHas('comment', fn (Builder $query) => $query->where('order_id', $order->id))
-            ->update([
-                'read_at' => now(),
-                'updated_at' => now(),
-            ]);
-
-        $order->load([
-            'comments' => fn ($query) => $query
-                ->whereNull('parent_id')
-                ->with('author')
-                ->withCount(['readRecipients', 'replies']),
-            'comments.replies' => fn ($query) => $query
-                ->with('author')
-                ->withCount('readRecipients'),
-        ]);
+        $this->loadOrderComments($order);
 
         $productStatusCounts = [
             'Selesai' => $order->items->sum(fn (OrderItem $item): int => $item->completed_quantity),
@@ -654,6 +678,7 @@ class OrderController extends Controller
     {
         $order->load(['items.category', 'items.catalogProduct', 'guest']);
         $order->synchronizeProductionStatusFromItems($order->items);
+        $this->loadOrderComments($order);
         $hasProductionWorkItems = $order->items->contains(
             fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true),
         );
@@ -679,6 +704,7 @@ class OrderController extends Controller
 
     public function update(Request $request, Order $order)
     {
+        $request->merge(['paid_amount' => $order->paid_amount]);
         $validated = $this->validateOrder($request, $order);
         $validated['paid_amount'] = $this->validatedPaidAmount($validated, $order);
         $catalogProducts = $this->catalogProductsForItems($validated['items']);
@@ -1311,6 +1337,11 @@ class OrderController extends Controller
             'order_type' => ['required', Rule::in(['Bali', 'Luar Bali', 'Ekspor'])],
             'phone' => 'nullable|string|max:50',
             'paid_amount' => ['nullable', 'numeric', 'min:0'],
+            'payment_date' => [
+                'nullable',
+                'date_format:Y-m-d',
+                'before_or_equal:'.today($request->user()->timezone())->toDateString(),
+            ],
 
             'deadline' => 'nullable|date|after:today',
             'deadline_change_reason' => ['nullable', 'string', 'max:1000'],
@@ -2022,6 +2053,37 @@ class OrderController extends Controller
                     });
                 });
         });
+    }
+
+    private function excludeArchivedCompletedOrders(Builder $query, string $monthStartDate): Builder
+    {
+        return $query->where(function (Builder $query) use ($monthStartDate): void {
+            $query->where('status', '!=', 'Selesai')
+                ->orWhereColumn('paid_amount', '<', 'total_order')
+                ->orWhereDate('created_at', '>=', $monthStartDate);
+        });
+    }
+
+    private function loadOrderComments(Order $order): void
+    {
+        OrderCommentRecipient::query()
+            ->where('user_id', auth()->id())
+            ->whereNull('read_at')
+            ->whereHas('comment', fn (Builder $query) => $query->where('order_id', $order->id))
+            ->update([
+                'read_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        $order->load([
+            'comments' => fn ($query) => $query
+                ->whereNull('parent_id')
+                ->with('author')
+                ->withCount(['readRecipients', 'replies']),
+            'comments.replies' => fn ($query) => $query
+                ->with('author')
+                ->withCount('readRecipients'),
+        ]);
     }
 
     private function safeCsvValue(?string $value): string

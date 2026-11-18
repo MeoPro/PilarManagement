@@ -33,7 +33,7 @@ class GuestController extends Controller
         ]);
     }
 
-    public function index(Request $request)
+    public function index(Request $request): View
     {
         $search = trim((string) $request->query('search', ''));
         $sortOptions = [
@@ -84,13 +84,25 @@ class GuestController extends Controller
         };
 
         $guests = $guests->paginate(15)->withQueryString();
-        $totalGuestDebt = Order::query()
+        $guestDebtSummary = Order::query()
             ->where('status', 'Selesai')
             ->whereColumn('paid_amount', '<', 'total_order')
             ->selectRaw('COALESCE(SUM(total_order - paid_amount), 0) AS total_debt')
-            ->value('total_debt');
+            ->selectRaw('COUNT(DISTINCT guest_id) AS indebted_guest_count')
+            ->first();
+        $totalGuestDebt = (float) $guestDebtSummary->total_debt;
+        $indebtedGuestCount = (int) $guestDebtSummary->indebted_guest_count;
+        $totalGuestCount = Guest::query()->count();
 
-        return view('guests.index', compact('guests', 'search', 'sort', 'sortOptions', 'totalGuestDebt'));
+        return view('guests.index', compact(
+            'guests',
+            'search',
+            'sort',
+            'sortOptions',
+            'totalGuestDebt',
+            'indebtedGuestCount',
+            'totalGuestCount',
+        ));
     }
 
     public function show(Guest $guest): View

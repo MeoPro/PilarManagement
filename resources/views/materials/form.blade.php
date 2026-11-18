@@ -57,25 +57,33 @@
             <input id="material-unit" type="text" name="unit" value="{{ old('unit', $material->unit) }}" maxlength="50" placeholder="Contoh: lembar, kg, meter">
         </div>
 
-        <div>
-            <label for="material-unit-price">Harga Satuan (Rp)</label>
-            <input
-                id="material-unit-price"
-                type="text"
-                name="unit_price"
-                inputmode="decimal"
-                data-money-input
-                oninput="formatMaterialMoney(this)"
-                value="{{ old('unit_price', $isEditing ? number_format((float) $material->unit_price, 2, '.', ',') : '') }}"
-                required
-            >
-        </div>
+        @if($isEditing)
+            <div>
+                <label>Harga Satuan Pembelian Terakhir</label>
+                <p>Rp {{ number_format((float) $material->unit_price, 2, ',', '.') }}</p>
+                <small>Harga diperbarui melalui transaksi stok masuk agar tercatat di laporan pengeluaran.</small>
+            </div>
+        @else
+            <div>
+                <label for="material-unit-price">Harga Satuan Pembelian (Rp)</label>
+                <input
+                    id="material-unit-price"
+                    type="text"
+                    name="unit_price"
+                    inputmode="decimal"
+                    data-money-input
+                    oninput="formatMaterialMoney(this)"
+                    value="{{ old('unit_price') }}"
+                    required
+                >
+            </div>
+        @endif
 
         @unless($isEditing)
             <div>
-                <label for="material-initial-stock">Stok Awal</label>
-                <input id="material-initial-stock" type="number" name="initial_stock" min="0" step="0.001" value="{{ old('initial_stock') }}">
-                <small>Stok awal dicatat sebagai transaksi masuk.</small>
+                <label for="material-initial-stock">Jumlah Stok Awal</label>
+                <input id="material-initial-stock" type="number" name="initial_stock" min="0.001" step="0.001" value="{{ old('initial_stock') }}" required>
+                <small>Stok awal dan nilainya dicatat sebagai pembelian material.</small>
             </div>
         @endunless
 

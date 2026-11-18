@@ -1388,6 +1388,18 @@ body.is-navigating .navigation-progress span {
     padding: 14px 18px;
 }
 
+.guest-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.guest-summary-grid .guest-debt-summary {
+    min-height: 82px;
+    margin: 0;
+}
+
 .guest-debt-summary span {
     color: #9a3412;
     font-size: 12px;
@@ -1397,6 +1409,12 @@ body.is-navigating .navigation-progress span {
 .guest-debt-summary strong,
 .guest-debt-amount {
     color: #c2410c;
+}
+
+@media (max-width: 700px) {
+    .guest-summary-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .page-container .row {
@@ -3153,6 +3171,242 @@ body.is-navigating .navigation-progress span {
     margin: 8px 0;
 }
 
+.order-payment-summary h4 {
+    margin: 22px 0 10px;
+}
+
+.order-payment-entry {
+    display: grid;
+    gap: 10px;
+    margin-top: 20px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    background: #fff;
+    padding: 16px;
+}
+
+.order-payment-entry h4 {
+    margin: 0;
+}
+
+.order-payment-entry input,
+.order-payment-entry textarea {
+    width: 100%;
+}
+
+.payment-opening-note {
+    display: grid;
+    gap: 4px;
+    border-left: 3px solid #f59e0b;
+    padding-left: 10px;
+}
+
+.payment-opening-note small {
+    color: #6b7280;
+}
+
+.revenue-filter-form {
+    align-items: end;
+}
+
+.revenue-filter-form label {
+    display: grid;
+    gap: 6px;
+    color: #4b5563;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.revenue-filter-form input {
+    flex: 0 1 190px !important;
+}
+
+.revenue-opening-note {
+    display: grid;
+    gap: 4px;
+    margin: 16px 0;
+    border: 1px solid #fed7aa;
+    border-radius: 10px;
+    background: #fff7ed;
+    padding: 14px 16px;
+    color: #9a3412;
+}
+
+.revenue-opening-note span {
+    color: #7c2d12;
+    font-size: 12px;
+}
+
+.revenue-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+    margin: 18px 0;
+}
+
+.revenue-summary-card {
+    position: relative;
+    display: grid;
+    min-height: 132px;
+    align-content: space-between;
+    gap: 12px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 12px;
+    padding: 18px;
+    color: #fff;
+    box-shadow: 0 8px 18px rgb(31 41 55 / 10%);
+}
+
+.revenue-summary-card::after {
+    position: absolute;
+    top: -30px;
+    right: -20px;
+    width: 115px;
+    height: 115px;
+    border-radius: 50%;
+    background: rgb(255 255 255 / 11%);
+    content: "";
+}
+
+.revenue-summary-card.is-monthly-orders {
+    background: linear-gradient(115deg, #087e8b, #0da6a6);
+}
+
+.revenue-summary-card.is-incoming {
+    background: linear-gradient(115deg, #0da979, #12ad78);
+}
+
+.revenue-summary-card.is-outgoing {
+    background: linear-gradient(115deg, #e78200, #f39800);
+}
+
+.revenue-summary-card.is-net {
+    background: linear-gradient(115deg, #2875ee, #3478ed);
+}
+
+.revenue-summary-card.is-cash-net {
+    background: linear-gradient(115deg, #576579, #354357);
+}
+
+.revenue-summary-card span,
+.revenue-summary-card strong,
+.revenue-summary-card small {
+    position: relative;
+    z-index: 1;
+}
+
+.revenue-summary-card span,
+.revenue-summary-card small {
+    color: rgb(255 255 255 / 85%);
+}
+
+.revenue-summary-card span {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.revenue-summary-card strong {
+    color: #fff;
+    font-size: clamp(18px, 2vw, 25px);
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
+.revenue-summary-card small {
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.revenue-outgoing-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 20px;
+    margin: 18px 0;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    background: #fff;
+    padding: 14px 16px;
+    color: #4b5563;
+    font-size: 12px;
+}
+
+.revenue-outgoing-breakdown strong {
+    color: #111827;
+}
+
+.revenue-transactions-card {
+    margin-top: 20px;
+}
+
+.revenue-transactions-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.revenue-transactions-heading h2,
+.revenue-transactions-heading p {
+    margin: 0;
+}
+
+.revenue-transactions-heading p,
+.revenue-transactions-heading > span {
+    margin-top: 5px;
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.revenue-direction-badge {
+    display: inline-flex;
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.revenue-direction-badge.is-incoming {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.revenue-direction-badge.is-outgoing {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.revenue-direction-badge.is-revenue {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.revenue-amount-in {
+    color: #15803d !important;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.revenue-amount-out {
+    color: #b45309 !important;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.revenue-amount-revenue {
+    color: #1d4ed8 !important;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.revenue-transactions-card td small {
+    display: block;
+    color: #6b7280;
+}
+
 .order-discussion {
     display: grid;
     gap: 18px;
@@ -3162,6 +3416,28 @@ body.is-navigating .navigation-progress span {
 .order-discussion > h2,
 .order-discussion > p {
     margin: 0;
+}
+
+@media (max-width: 1000px) {
+    .revenue-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 600px) {
+    .revenue-summary-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .revenue-transactions-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .revenue-filter-form label,
+    .revenue-filter-form input {
+        width: 100%;
+    }
 }
 
 .order-comment-list,
@@ -3212,6 +3488,22 @@ body.is-navigating .navigation-progress span {
 .order-comment-status .is-read {
     color: #2563eb;
     font-weight: 650;
+}
+
+.order-comment-edit-actions,
+.order-comment-edit-form {
+    display: grid;
+    gap: 8px;
+}
+
+.order-comment-edit-actions {
+    justify-items: start;
+}
+
+.order-comment-edit-form[hidden],
+.order-comment-body[hidden],
+[data-comment-edit-toggle][hidden] {
+    display: none;
 }
 
 .order-comment-replies {

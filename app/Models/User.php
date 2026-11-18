@@ -208,6 +208,7 @@ class User extends Authenticatable
         $sharedMenus = [
             'calendar' => 'Kalender Order',
             'orders' => 'Daftar Order',
+            'revenue' => 'Omzet',
             'order_products' => 'Produk Orderan',
             'employees' => 'Karyawan',
             'attendance' => 'Absensi',

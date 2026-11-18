@@ -56,17 +56,19 @@
                 <input id="transaction-quantity" type="number" name="quantity" min="0.001" step="0.001" value="{{ old('quantity') }}" required>
             </div>
             <div>
-                <label for="transaction-price">Harga Satuan (Rp)</label>
-                <input
-                    id="transaction-price"
-                    type="text"
-                    name="unit_price"
-                    inputmode="decimal"
-                    data-money-input
-                    oninput="formatMaterialMoney(this)"
-                    value="{{ old('unit_price', number_format((float) $material->unit_price, 2, '.', ',')) }}"
-                >
-                <small>Harga untuk transaksi masuk; transaksi keluar memakai harga satuan material.</small>
+                <div data-material-purchase-price>
+                    <label for="transaction-price">Harga Pembelian per Satuan (Rp)</label>
+                    <input
+                        id="transaction-price"
+                        type="text"
+                        name="unit_price"
+                        inputmode="decimal"
+                        data-money-input
+                        oninput="formatMaterialMoney(this)"
+                        value="{{ old('unit_price', number_format((float) $material->unit_price, 2, '.', ',')) }}"
+                    >
+                    <small>Isi harga setiap stok masuk. Stok keluar dihitung dengan biaya rata-rata tertimbang.</small>
+                </div>
             </div>
             <div>
                 <label for="transaction-date">Tanggal</label>
@@ -91,7 +93,7 @@
                         <th>Tanggal</th>
                         <th>Transaksi</th>
                         <th>Jumlah</th>
-                        <th>Harga Satuan</th>
+                        <th>Harga Satuan Biaya</th>
                         <th>Catatan</th>
                         <th>Dicatat Oleh</th>
                     </tr>
@@ -117,6 +119,25 @@
 @endsection
 
 <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const transactionType = document.querySelector('#transaction-type');
+        const purchasePrice = document.querySelector('[data-material-purchase-price]');
+        const purchasePriceInput = document.querySelector('#transaction-price');
+
+        if (!transactionType || !purchasePrice || !purchasePriceInput) {
+            return;
+        }
+
+        const updatePurchasePriceVisibility = function () {
+            const isPurchase = transactionType.value === 'in';
+            purchasePrice.hidden = !isPurchase;
+            purchasePriceInput.required = isPurchase;
+        };
+
+        transactionType.addEventListener('change', updatePurchasePriceVisibility);
+        updatePurchasePriceVisibility();
+    });
+
     function formatMaterialMoney(input)
     {
         const parts = input.value.replace(/,/g, '').replace(/[^\d.]/g, '').split('.');

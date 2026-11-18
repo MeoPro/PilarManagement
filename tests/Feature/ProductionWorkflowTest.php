@@ -111,6 +111,7 @@ test('PF work stays new until every production item has a work drawing', functio
     $this->from(route('order-products.index'))
         ->patch(route('order-products.factory-drawing.update', $item), [
             'factory_drawing_image' => workflowImage('drawing-one.png'),
+            'factory_sale_price' => '100,000',
         ])->assertRedirect(route('order-products.index'));
 
     expect($order->fresh()->status)->toBe('None');
@@ -142,6 +143,7 @@ test('PF work stays new until every production item has a work drawing', functio
         ->from(route('order-products.index'))
         ->patch(route('order-products.factory-drawing.update', $pendingItem), [
             'factory_drawing_image' => workflowImage('drawing-two.png'),
+            'factory_sale_price' => '100,000',
         ])
         ->assertRedirect(route('order-products.index'));
 
@@ -166,12 +168,103 @@ test('PF cannot upload a work drawing before PB starts production', function () 
         ->from(route('order-products.index'))
         ->patch(route('order-products.factory-drawing.update', $item), [
             'factory_drawing_image' => workflowImage('too-early.png'),
+            'factory_sale_price' => '100,000',
         ])
         ->assertSessionHasErrors('factory_drawing_image');
 
     expect($item->fresh()->factory_drawing_image)->toBeNull()
         ->and($item->fresh()->factory_status)->toBe('None')
         ->and($order->fresh()->status)->toBe('None');
+    $this->assertDatabaseCount('order_events', 0);
+});
+
+test('PF transfer revenue is recorded when the completed order item is handed to PB', function () {
+    Storage::fake('public');
+    $this->travelTo('2026-11-18 10:00:00');
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['order_products'],
+    ]);
+    $salesAdmin = User::factory()->admin()->create([
+        'accessible_menus' => ['order_products'],
+    ]);
+    [$order, $item] = createWorkflowOrder('WORKFLOW-PF-TRANSFER');
+
+    $this->actingAs($factoryAdmin)
+        ->patch(route('order-products.factory-drawing.update', $item), [
+            'factory_drawing_image' => workflowImage('transfer-drawing.png'),
+            'factory_sale_price' => '125,000',
+        ])
+        ->assertRedirect();
+
+    expect((float) $item->fresh()->factory_sale_price)->toBe(125000.0);
+
+    $item->update([
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Dalam Perjalanan',
+        'qty_completed' => 2,
+    ]);
+
+    $this->actingAs($salesAdmin)
+        ->from(route('order-products.index'))
+        ->patch(route('order-products.update', $item), [
+            'items' => [
+                $item->id => [
+                    'status' => 'Distribusi',
+                    'qty_completed' => 1,
+                    'status_images' => [workflowImage('partial-handover.png')],
+                ],
+            ],
+        ])
+        ->assertSessionHasErrors("items.{$item->id}.status");
+
+    expect($item->fresh()->factory_handover_at)->toBeNull();
+
+    $this->from(route('order-products.index'))
+        ->patch(route('order-products.update', $item), [
+            'items' => [
+                $item->id => [
+                    'status' => 'Distribusi',
+                    'qty_completed' => 2,
+                    'status_images' => [workflowImage('complete-handover.png')],
+                ],
+            ],
+        ])
+        ->assertRedirect(route('order-products.index'));
+
+    expect($item->fresh()->factory_handover_at)->not->toBeNull();
+
+    $factoryRevenueAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['revenue'],
+    ]);
+    $this->actingAs($factoryRevenueAdmin)
+        ->get(route('revenue.index', [
+            'from' => '2026-11-01',
+            'to' => '2026-11-18',
+        ]))
+        ->assertSeeText('Omzet PF ke PB')
+        ->assertSeeText('Penjualan PF ke PB')
+        ->assertSeeText($order->order_id)
+        ->assertViewHas('factorySaleTotal', 250000.0)
+        ->assertViewHas('totalIncoming', 0.0)
+        ->assertViewHas('factoryNetRevenue', 250000.0);
+});
+
+test('PF requires a sale price when uploading a non-stock work drawing', function () {
+    Storage::fake('public');
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['order_products'],
+    ]);
+    [$order, $item] = createWorkflowOrder('WORKFLOW-MISSING-TRANSFER-PRICE');
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('order-products.index'))
+        ->patch(route('order-products.factory-drawing.update', $item), [
+            'factory_drawing_image' => workflowImage('missing-transfer-price.png'),
+        ])
+        ->assertSessionHasErrors('factory_sale_price');
+
+    expect($item->fresh()->factory_drawing_image)->toBeNull()
+        ->and($item->fresh()->factory_sale_price)->toBeNull();
     $this->assertDatabaseCount('order_events', 0);
 });
 

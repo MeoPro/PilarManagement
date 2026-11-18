@@ -137,7 +137,8 @@
                                 @if($canAssignPiecework
                                     && in_array($item->status, ['Distribusi', 'Produksi'], true)
                                     && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0)
-                                    && blank($item->factory_drawing_image)
+                                    && (blank($item->factory_drawing_image)
+                                        || ($item->source !== 'Stock' && $item->factory_sale_price === null))
                                     && $order->status !== 'Cancel')
                                     <form
                                         action="{{ route('order-products.factory-drawing.update', $item) }}"
@@ -155,7 +156,21 @@
                                             accept="image/jpeg,image/png,image/webp"
                                             required
                                         >
-                                        <button type="submit" class="btn primary">Simpan gambar kerja</button>
+                                        @if($item->source !== 'Stock')
+                                            <label for="factory-sale-price-{{ $item->id }}">Harga jual per unit ke PB (Rp)</label>
+                                            <input
+                                                id="factory-sale-price-{{ $item->id }}"
+                                                type="text"
+                                                name="factory_sale_price"
+                                                inputmode="decimal"
+                                                data-money-input
+                                                value="{{ old('factory_sale_price', $item->factory_sale_price !== null ? number_format((float) $item->factory_sale_price, 2, '.', ',') : '') }}"
+                                                required
+                                            >
+                                        @endif
+                                        <button type="submit" class="btn primary">
+                                            {{ $item->source === 'Stock' ? 'Simpan gambar kerja' : 'Simpan gambar dan harga ke PB' }}
+                                        </button>
                                     </form>
                                 @endif
                             </td>
@@ -406,7 +421,84 @@
                 <h3>Pembayaran</h3>
                 <p><strong>DP / Dibayar:</strong> {{ number_format($order->paid_percentage, 1, ',', '.') }}% · Rp {{ number_format($order->paid_amount, 0, '.', ',') }}</p>
                 <p><strong>Sisa pembayaran:</strong> Rp {{ number_format($order->amount_remaining, 0, '.', ',') }}</p>
-                <p><strong>Status:</strong> {{ $order->is_debt ? 'Hutang' : ($order->is_paid ? 'Lunas' : 'Belum lunas') }}</p>
+                <p><strong>Status:</strong> {{ $order->is_paid ? 'Sudah dibayar' : 'Belum dibayar' }}</p>
+
+                @if((float) $order->opening_paid_amount > 0)
+                    <p class="payment-opening-note">
+                        <strong>Saldo awal tanpa tanggal:</strong>
+                        Rp {{ number_format((float) $order->opening_paid_amount, 0, ',', '.') }}
+                        <small>Pembayaran ini sudah termasuk di total dibayar, tetapi tanggal cicilannya belum tercatat.</small>
+                    </p>
+                @endif
+
+                <h4>Riwayat cicilan</h4>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Tanggal</th>
+                                <th>Jumlah</th>
+                                <th>Catatan</th>
+                                <th>Diterima oleh</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @forelse($order->payments as $payment)
+                                <tr>
+                                    <td>{{ $payment->paid_at->format('d/m/Y') }}</td>
+                                    <td>Rp {{ number_format((float) $payment->amount, 0, ',', '.') }}</td>
+                                    <td>{{ $payment->note ?? '—' }}</td>
+                                    <td>{{ $payment->receivedBy?->name ?? '—' }}</td>
+                                </tr>
+                            @empty
+                                <tr><td colspan="4">Belum ada cicilan bertanggal.</td></tr>
+                            @endforelse
+                        </tbody>
+                    </table>
+                </div>
+
+                @if($order->status !== 'Cancel')
+                    <form
+                        action="{{ route('orders.payments.store', $order) }}"
+                        method="POST"
+                        class="order-payment-entry"
+                    >
+                        @csrf
+                        <h4>Catat pembayaran</h4>
+                        <label for="payment-amount">Jumlah diterima (sisa Rp {{ number_format($order->amount_remaining, 0, ',', '.') }})</label>
+                        <input
+                            id="payment-amount"
+                            type="text"
+                            name="amount"
+                            inputmode="decimal"
+                            data-money-input
+                            value="{{ old('amount') }}"
+                            placeholder="Contoh: 100,000"
+                            required
+                        >
+                        @error('amount')
+                            <small class="field-error" role="alert">{{ $message }}</small>
+                        @enderror
+                        <label for="payment-paid-at">Tanggal pembayaran</label>
+                        <input
+                            id="payment-paid-at"
+                            type="date"
+                            name="paid_at"
+                            value="{{ old('paid_at', now(auth()->user()->timezone())->toDateString()) }}"
+                            max="{{ now(auth()->user()->timezone())->toDateString() }}"
+                            required
+                        >
+                        @error('paid_at')
+                            <small class="field-error" role="alert">{{ $message }}</small>
+                        @enderror
+                        <label for="payment-note">Catatan (opsional)</label>
+                        <textarea id="payment-note" name="note" rows="2" maxlength="1000">{{ old('note') }}</textarea>
+                        @error('note')
+                            <small class="field-error" role="alert">{{ $message }}</small>
+                        @enderror
+                        <button class="btn btn-primary" type="submit">Simpan cicilan</button>
+                    </form>
+                @endif
             </section>
         @endif
     </section>
@@ -509,13 +601,7 @@
         </ul>
     @endif
 
-    <div class="order-comment-list" data-order-comment-list>
-        @forelse($order->comments as $comment)
-            @include('orders.partials.comment-thread', ['comment' => $comment, 'order' => $order])
-        @empty
-            <p class="muted" data-order-comment-empty>Belum ada komentar pada order ini.</p>
-        @endforelse
-    </div>
+    @include('orders.partials.comment-list', ['order' => $order])
 
     <form action="{{ route('orders.comments.store', $order) }}" method="POST" class="order-comment-new-form" data-order-comment-form>
         @csrf

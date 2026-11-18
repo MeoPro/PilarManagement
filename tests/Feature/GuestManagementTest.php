@@ -185,6 +185,42 @@ test('guest list and profile show the total number of recorded orders', function
         ->assertSee('Jumlah order:</strong> 3 kali', false);
 });
 
+test('guest list summarizes completed unpaid debt, indebted guests, and all guests', function () {
+    $indebtedGuest = Guest::create(['name' => 'Guest With Completed Debt']);
+    $secondIndebtedGuest = Guest::create(['name' => 'Second Indebted Guest']);
+    $paidGuest = Guest::create(['name' => 'Paid Guest']);
+    Guest::create(['name' => 'Guest Without Orders']);
+
+    foreach ([
+        [$indebtedGuest, 'DEBT-FIRST', 100000, 20000, 'Selesai'],
+        [$indebtedGuest, 'DEBT-SECOND', 60000, 0, 'Selesai'],
+        [$indebtedGuest, 'DEBT-ACTIVE', 25000, 0, 'Produksi'],
+        [$secondIndebtedGuest, 'DEBT-THIRD', 30000, 0, 'Selesai'],
+        [$paidGuest, 'DEBT-PAID', 50000, 50000, 'Selesai'],
+        [$paidGuest, 'DEBT-CANCELLED', 200000, 0, 'Cancel'],
+    ] as [$guest, $orderId, $totalOrder, $paidAmount, $status]) {
+        Order::create([
+            'order_id' => $orderId,
+            'guest_id' => $guest->id,
+            'guest_name' => $guest->name,
+            'total_order' => $totalOrder,
+            'paid_amount' => $paidAmount,
+            'status' => $status,
+        ]);
+    }
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->get(route('guests.index', ['search' => 'Guest With Completed Debt']))
+        ->assertViewHas('totalGuestDebt', 170000.0)
+        ->assertViewHas('indebtedGuestCount', 2)
+        ->assertViewHas('totalGuestCount', 4)
+        ->assertSeeText('Jumlah tamu berhutang')
+        ->assertSeeText('Total semua tamu')
+        ->assertSeeText('Rp 170.000')
+        ->assertSeeText('2 tamu')
+        ->assertSeeText('4 tamu');
+});
+
 test('active orders prevent deleting a guest and keep the guest record intact', function () {
     $guest = Guest::create(['name' => 'Guest With Active Order']);
     $order = Order::create([

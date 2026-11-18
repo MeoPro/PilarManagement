@@ -298,3 +298,110 @@ test('comment validation preserves entered text', function () {
     $this->get(route('orders.show', $order))
         ->assertSee('Retained comment text.');
 });
+
+test('comment authors can edit their comments from the order detail and edit pages', function () {
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'EDITABLE-COMMENT-ORDER',
+        'guest_name' => 'Editable Comment Guest',
+        'total_order' => 100000,
+        'status' => 'None',
+    ]);
+    $comment = $order->comments()->create([
+        'user_id' => $admin->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Original comment.',
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('orders.show', $order))
+        ->assertSee('Edit komentar')
+        ->assertSee('Original comment.');
+
+    $this->get(route('orders.edit', $order))
+        ->assertSee('Edit komentar')
+        ->assertSee('Original comment.');
+
+    $updatedBody = '<script>alert(1)</script>Updated comment.';
+    $response = $this->patchJson(route('orders.comments.update', [$order, $comment]), [
+        'body' => $updatedBody,
+    ])
+        ->assertOk()
+        ->assertJsonPath('comment.id', $comment->id)
+        ->assertJsonPath('message', 'Komentar berhasil diperbarui.');
+
+    expect($response->json('html'))
+        ->toContain('&lt;script&gt;')
+        ->not->toContain($updatedBody);
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $comment->id,
+        'body' => $updatedBody,
+    ]);
+});
+
+test('only the comment author can edit it and comments cannot be edited across orders', function () {
+    $author = User::factory()->admin()->create();
+    $otherAdmin = User::factory()->factoryAdmin()->create();
+    $order = Order::create([
+        'order_id' => 'COMMENT-AUTHOR-ORDER',
+        'guest_name' => 'Comment Author Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+    $otherOrder = Order::create([
+        'order_id' => 'COMMENT-OTHER-ORDER',
+        'guest_name' => 'Other Comment Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+    $comment = $order->comments()->create([
+        'user_id' => $author->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Author-only comment.',
+    ]);
+
+    $this->actingAs($otherAdmin)
+        ->get(route('orders.show', $order))
+        ->assertDontSee('Edit komentar');
+
+    $this->patchJson(route('orders.comments.update', [$order, $comment]), [
+        'body' => 'Unauthorized update.',
+    ])->assertForbidden();
+
+    $this->actingAs($author)
+        ->patchJson(route('orders.comments.update', [$otherOrder, $comment]), [
+            'body' => 'Cross-order update.',
+        ])
+        ->assertNotFound();
+
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $comment->id,
+        'body' => 'Author-only comment.',
+    ]);
+});
+
+test('comment edit rejects an empty body without changing the saved comment', function () {
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'COMMENT-VALIDATION-ORDER',
+        'guest_name' => 'Comment Validation Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+    $comment = $order->comments()->create([
+        'user_id' => $admin->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Keep this comment.',
+    ]);
+
+    $this->actingAs($admin)
+        ->patchJson(route('orders.comments.update', [$order, $comment]), [
+            'body' => '',
+        ])
+        ->assertInvalid(['body']);
+
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $comment->id,
+        'body' => 'Keep this comment.',
+    ]);
+});

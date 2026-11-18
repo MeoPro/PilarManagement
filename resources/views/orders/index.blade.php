@@ -37,7 +37,7 @@
             </article>
         @endif
         <article class="order-summary-card is-orders">
-            <span>Total Orders</span>
+            <span>Total Order Bulan Ini</span>
             <strong>{{ number_format($orderStats->total_orders ?? 0) }}</strong>
             <x-layout.icon name="orders" class="order-summary-icon" />
         </article>
@@ -85,7 +85,7 @@
 
         <nav class="order-status-tabs" aria-label="Filter status order">
             @foreach($statusTabs as $tab)
-                @php($tabCount = $tab['value'] === '' ? $statusCounts->sum() : (int) $statusCounts->get($tab['value'], 0))
+                @php($tabCount = $tab['value'] === '' ? $allOrdersCount : (int) $statusCounts->get($tab['value'], 0))
                 @php($tabUrl = route('orders.index', array_filter([
                     'search' => $search,
                     'sort' => $sort,

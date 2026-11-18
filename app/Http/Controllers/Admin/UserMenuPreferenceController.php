@@ -15,6 +15,7 @@ class UserMenuPreferenceController extends Controller
     private const SIDEBAR_MENU_ITEMS = [
         'calendar' => ['group' => 'Operasional', 'label' => 'Kalender Order', 'permission' => 'calendar', 'unit_limited' => true],
         'orders' => ['group' => 'Orderan', 'label' => 'Daftar Order', 'permission' => 'orders', 'unit_limited' => true],
+        'revenue' => ['group' => 'Finance', 'label' => 'Omzet', 'permission' => 'revenue', 'unit_limited' => true],
         'products' => ['group' => 'Operasional', 'label' => 'Katalog Produk', 'permission' => 'products', 'unit_limited' => true],
         'order_products' => ['group' => 'Orderan', 'label' => 'Produk Orderan', 'permission' => 'order_products', 'unit_limited' => true],
         'subcontractor_products' => ['group' => 'Operasional', 'label' => 'Produk Subcon', 'permission' => 'subcontractors', 'unit_limited' => true],
@@ -39,6 +40,7 @@ class UserMenuPreferenceController extends Controller
     private const MENU_PERMISSIONS = [
         'calendar' => 'calendar',
         'orders' => 'orders',
+        'revenue' => 'revenue',
         'products' => 'products',
         'order_products' => 'order_products',
         'subcontractor_products' => 'subcontractors',

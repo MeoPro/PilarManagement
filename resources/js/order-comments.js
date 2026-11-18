@@ -1,9 +1,14 @@
 document.addEventListener('submit', async (event) => {
-    if (!(event.target instanceof HTMLFormElement) || !event.target.matches('[data-order-comment-form]')) {
+    if (!(event.target instanceof HTMLFormElement)) {
         return;
     }
 
     const form = event.target;
+    const isEditForm = form.matches('[data-order-comment-edit-form]');
+    if (!isEditForm && !form.matches('[data-order-comment-form]')) {
+        return;
+    }
+
     const commentList = document.querySelector('[data-order-comment-list]');
     const feedback = form.querySelector('[data-comment-feedback]');
     const errorMessage = form.querySelector('[data-comment-error]');
@@ -20,7 +25,7 @@ document.addEventListener('submit', async (event) => {
     }
     if (submitButton) {
         submitButton.disabled = true;
-        submitButton.textContent = 'Mengirim...';
+        submitButton.textContent = isEditForm ? 'Menyimpan...' : 'Mengirim...';
     }
 
     try {
@@ -55,6 +60,24 @@ document.addEventListener('submit', async (event) => {
 
         if (!commentElement) {
             throw new Error('Komentar tersimpan, tetapi tidak dapat ditampilkan. Muat ulang halaman order.');
+        }
+
+        if (isEditForm) {
+            const commentId = String(payload.comment.id);
+            const existingComment = [...commentList.querySelectorAll('[data-order-comment-id]')]
+                .find((element) => element.dataset.orderCommentId === commentId);
+
+            if (!existingComment) {
+                throw new Error('Komentar diperbarui, tetapi tidak ditemukan pada halaman. Muat ulang halaman order.');
+            }
+
+            existingComment.replaceWith(commentElement);
+            const successMessage = document.createElement('p');
+            successMessage.className = 'message';
+            successMessage.setAttribute('role', 'status');
+            successMessage.textContent = payload.message;
+            commentElement.prepend(successMessage);
+            return;
         }
 
         const parentId = new FormData(form).get('parent_id');
@@ -97,5 +120,52 @@ document.addEventListener('submit', async (event) => {
             submitButton.disabled = false;
             submitButton.textContent = originalButtonLabel;
         }
+    }
+});
+
+document.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) {
+        return;
+    }
+
+    const editButton = event.target.closest('[data-comment-edit-toggle]');
+    if (editButton) {
+        const comment = editButton.closest('[data-order-comment-id]');
+        const editForm = comment?.querySelector('[data-order-comment-edit-form]');
+        const commentBody = comment?.querySelector('[data-comment-body]');
+
+        if (editForm && commentBody) {
+            editButton.hidden = true;
+            commentBody.hidden = true;
+            editForm.hidden = false;
+            editForm.querySelector('textarea')?.focus();
+        }
+
+        return;
+    }
+
+    const cancelButton = event.target.closest('[data-comment-edit-cancel]');
+    if (!cancelButton) {
+        return;
+    }
+
+    const comment = cancelButton.closest('[data-order-comment-id]');
+    const editForm = comment?.querySelector('[data-order-comment-edit-form]');
+    if (!editForm) {
+        return;
+    }
+
+    editForm.reset();
+    editForm.hidden = true;
+    editForm.querySelectorAll('[data-comment-feedback], [data-comment-error]').forEach((message) => {
+        message.hidden = true;
+    });
+    const commentBody = comment.querySelector('[data-comment-body]');
+    const commentEditButton = comment.querySelector('[data-comment-edit-toggle]');
+    if (commentBody) {
+        commentBody.hidden = false;
+    }
+    if (commentEditButton) {
+        commentEditButton.hidden = false;
     }
 });

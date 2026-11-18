@@ -247,6 +247,9 @@
                                         <p>Produksi tersisa: {{ $item->factory_qty_remaining }} unit</p>
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>
                                     @endif
+                                    @if($item->source !== 'Stock' && $item->factory_sale_price !== null)
+                                        <p>Harga jual ke PB: Rp {{ number_format((float) $item->factory_sale_price, 0, ',', '.') }} / unit</p>
+                                    @endif
                                     @if(in_array($item->status, ['Distribusi', 'Produksi'], true)
                                         && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0)
                                         && blank($item->factory_drawing_image))
@@ -277,7 +280,27 @@
                                                 accept="image/jpeg,image/png,image/webp"
                                                 required
                                             >
-                                            <button type="submit" class="btn primary">Simpan gambar kerja</button>
+                                            @error('factory_drawing_image')
+                                                <span class="form-error">{{ $message }}</span>
+                                            @enderror
+                                            @if($item->source !== 'Stock')
+                                                <label for="factory-sale-price-{{ $item->id }}">Harga jual per unit ke PB (Rp)</label>
+                                                <input
+                                                    id="factory-sale-price-{{ $item->id }}"
+                                                    type="text"
+                                                    name="factory_sale_price"
+                                                    inputmode="decimal"
+                                                    data-money-input
+                                                    value="{{ old('factory_sale_price', $item->factory_sale_price !== null ? number_format((float) $item->factory_sale_price, 2, '.', ',') : '') }}"
+                                                    required
+                                                >
+                                                @error('factory_sale_price')
+                                                    <span class="form-error">{{ $message }}</span>
+                                                @enderror
+                                            @endif
+                                            <button type="submit" class="btn primary">
+                                                {{ $item->source === 'Stock' ? 'Simpan gambar kerja' : 'Simpan gambar dan harga ke PB' }}
+                                            </button>
                                         </form>
                                     @elseif($item->factory_status === 'Finishing')
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>

@@ -287,7 +287,26 @@ class OrderProductController extends Controller
                 ]);
             }
 
-            if ($previousStatus === $status && $previousCompleted === $completed && $statusPhotos === []) {
+            $recordsFactoryHandover = $status === 'Distribusi'
+                && $item->source !== 'Stock'
+                && $item->factory_handover_at === null;
+
+            if ($recordsFactoryHandover && $item->factory_sale_price === null) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.status" => 'Tentukan harga jual ke PB saat mengunggah gambar kerja PF sebelum produk diserahkan.',
+                ]);
+            }
+
+            if ($recordsFactoryHandover && $completed < $maximumQuantity) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.status" => 'Selesaikan jumlah produk sebelum mencatat penyerahan dari PF ke PB.',
+                ]);
+            }
+
+            if ($previousStatus === $status
+                && $previousCompleted === $completed
+                && $statusPhotos === []
+                && ! $recordsFactoryHandover) {
                 return;
             }
 
@@ -310,6 +329,7 @@ class OrderProductController extends Controller
                 'qty_completed' => $completed,
                 'status_image' => $statusImagePath,
                 'status_images' => $statusImagePaths ?: null,
+                'factory_handover_at' => $recordsFactoryHandover ? now() : $item->factory_handover_at,
             ]);
             if ($factoryWorkflow) {
                 $item->synchronizeStatusFromWorkAllocations();
@@ -372,8 +392,12 @@ class OrderProductController extends Controller
     {
         $user = $request->user();
         abort_unless($user->isFactoryWorkflow() && $user->canAccessMenu('order_products'), 403);
+        $this->normalizeMoney($request, 'factory_sale_price');
         $validated = $request->validate([
             'factory_drawing_image' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'factory_sale_price' => $orderItem->source === 'Stock'
+                ? ['nullable', 'numeric', 'min:0']
+                : ['required', 'numeric', 'min:0'],
         ]);
         $previousPath = null;
         $newPath = null;
@@ -402,10 +426,14 @@ class OrderProductController extends Controller
 
             $previousPath = $item->factory_drawing_image;
             $newPath = $validated['factory_drawing_image']->store('orders/factory-drawings', 'public');
-            $item->update([
+            $updates = [
                 'factory_drawing_image' => $newPath,
                 'factory_status' => $isWaitingForFactoryDrawing ? 'Produksi' : $item->factory_status,
-            ]);
+            ];
+            if ($item->source !== 'Stock') {
+                $updates['factory_sale_price'] = $validated['factory_sale_price'];
+            }
+            $item->update($updates);
             $order->events()->create([
                 'order_item_id' => $item->id,
                 'type' => 'factory_drawing_uploaded',
@@ -774,5 +802,18 @@ class OrderProductController extends Controller
                     "order_items.qty > COALESCE(order_items.quality_good_quantity, 0) + COALESCE(order_items.quality_damaged_quantity, 0) + COALESCE(order_items.quality_short_quantity, 0) + COALESCE((SELECT SUM(order_item_services.quantity) FROM order_item_services WHERE order_item_services.order_item_id = order_items.id AND order_item_services.status = 'Service'), 0)",
                 )->orWhereHas('services', fn (Builder $serviceQuery) => $serviceQuery->where('status', 'Service'));
             });
+    }
+
+    private function normalizeMoney(Request $request, string $field): void
+    {
+        $value = $request->input($field);
+        if (! is_string($value)) {
+            return;
+        }
+
+        $value = trim($value);
+        if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $value) === 1) {
+            $request->merge([$field => str_replace(',', '', $value)]);
+        }
     }
 }
