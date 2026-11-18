@@ -180,7 +180,7 @@
                                 </td>
                                 <td>
                                     <span class="order-status-pill is-{{ $statusClass }}">{{ $statusLabel }}</span>
-                                    @if($order->is_urgent)
+                                    @if($factoryWorkflow ? $order->is_factory_urgent : $order->is_urgent)
                                         <span class="urgent">URGENT</span>
                                     @endif
                                 </td>
@@ -227,7 +227,7 @@
                             <th>Order</th>
                             <th>Produk</th>
                             <th>Ready</th>
-                            <th>Target Kirim</th>
+                            <th>{{ $factoryWorkflow ? 'Target PF / Kirim' : 'Target Kirim' }}</th>
                             <th>Status Produksi</th>
                             <th>Aksi</th>
                         </tr>
@@ -255,10 +255,17 @@
                                         {{ (int) ($order->ready_units ?? 0) }}/{{ (int) ($order->items_sum_qty ?? 0) }} unit
                                     </small>
                                 </td>
-                                <td>{{ $order->deadline?->format('d/m/Y') ?? '-' }}</td>
+                                <td>
+                                    @if($factoryWorkflow)
+                                        <small><strong>Target PF:</strong> {{ $order->factory_deadline?->format('d/m/Y') ?? 'Belum dimulai' }}</small>
+                                        <small>Target kirim PB: {{ $order->deadline?->format('d/m/Y') ?? '-' }}</small>
+                                    @else
+                                        {{ $order->deadline?->format('d/m/Y') ?? '-' }}
+                                    @endif
+                                </td>
                                 <td>
                                     {{ $order->status === 'None' ? 'New' : $order->status }}
-                                    @if($order->is_urgent)
+                                    @if($factoryWorkflow ? $order->is_factory_urgent : $order->is_urgent)
                                         <span class="urgent">URGENT</span>
                                     @endif
                                 </td>

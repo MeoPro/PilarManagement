@@ -364,6 +364,57 @@ test('percepatan deadline tanpa produk produksi langsung memperbarui deadline ak
         ->and($order->fresh()->pending_deadline)->toBeNull();
 });
 
+test('deadline internal PF mengurangi satu minggu atau satu bulan sesuai sisa waktu', function () {
+    $this->travelTo('2026-01-01 09:00:00');
+
+    $deadlineCases = [
+        ['three-weeks', today()->addWeeks(3), today()->addWeeks(2)],
+        ['three-months', today()->addMonths(3), today()->addMonths(2)],
+        ['seven-weeks', today()->addWeeks(7), today()->addWeeks(6)],
+    ];
+
+    foreach ($deadlineCases as [$case, $deliveryDeadline, $expectedFactoryDeadline]) {
+        $order = Order::create([
+            'order_id' => "FACTORY-DEADLINE-{$case}",
+            'guest_name' => 'Factory Deadline Guest',
+            'total_order' => 100,
+            'deadline' => $deliveryDeadline->toDateString(),
+            'status' => 'None',
+        ]);
+        $item = $order->items()->create([
+            'product' => 'Factory Deadline Product',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'None',
+            'factory_status' => 'None',
+        ]);
+
+        $item->update([
+            'status' => 'Produksi',
+            'factory_status' => 'Produksi',
+        ]);
+
+        expect($order->fresh()->factory_started_at->toDateString())->toBe('2026-01-01')
+            ->and($order->fresh()->factory_deadline->toDateString())->toBe($expectedFactoryDeadline->toDateString());
+    }
+
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['orders'],
+    ]);
+    $order = Order::query()->where('order_id', 'FACTORY-DEADLINE-three-weeks')->firstOrFail();
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('orders.show', $order))
+        ->assertSee('Target PF:')
+        ->assertSee('15 Jan 2026')
+        ->assertSee('22 Jan 2026');
+
+    $this->get(route('orders.index', ['search' => 'FACTORY-DEADLINE-three-weeks']))
+        ->assertSee('Target PF:')
+        ->assertSee('15/01/2026');
+});
+
 test('PF dapat menyetujui pengajuan deadline dan tanggal aktif berubah', function () {
     $requester = User::factory()->admin()->create();
     $factoryAdmin = User::factory()->factoryAdmin()->create();
@@ -378,13 +429,22 @@ test('PF dapat menyetujui pengajuan deadline dan tanggal aktif berubah', functio
         'pending_deadline_requested_at' => now(),
         'status' => 'Proses Produksi',
     ]);
+    $order->items()->create([
+        'product' => 'Approval Deadline Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
 
     $this->actingAs($factoryAdmin)
         ->get(route('orders.show', $order))
         ->assertOk()
         ->assertSee('Pengajuan Percepatan Deadline')
         ->assertSee('Setujui deadline')
-        ->assertSee('Tolak pengajuan');
+        ->assertSee('Tolak pengajuan')
+        ->assertSee('Target PF:');
 
     $this->from(route('orders.show', $order))
         ->patch(route('orders.deadline-change.approve', $order))
@@ -393,6 +453,7 @@ test('PF dapat menyetujui pengajuan deadline dan tanggal aktif berubah', functio
 
     expect($order->fresh()->deadline->toDateString())->toBe(today()->addDays(20)->toDateString())
         ->and($order->fresh()->pending_deadline)->toBeNull()
+        ->and($order->fresh()->factory_deadline->toDateString())->toBe(today()->addDays(13)->toDateString())
         ->and($order->events()->where('type', 'deadline_change_approved')->exists())->toBeTrue();
 });
 
@@ -1411,11 +1472,13 @@ test('endpoint produksi menolak perubahan status order tanpa perubahan produk', 
 test('order changes to production when every product enters production', function () {
     Storage::fake('public');
     $guest = Guest::create(['name' => 'Production Status Guest']);
+    $deliveryDeadline = today()->addWeeks(3)->toDateString();
     $order = Order::create([
         'order_id' => 'ALL-PRODUCTS-PRODUCTION',
         'guest_id' => $guest->id,
         'guest_name' => $guest->name,
         'total_order' => 20000,
+        'deadline' => $deliveryDeadline,
         'status' => 'None',
     ]);
     $firstItem = $order->items()->create([
@@ -1446,7 +1509,9 @@ test('order changes to production when every product enters production', functio
         ])
         ->assertRedirect(route('orders.edit', $order));
 
-    expect($order->fresh()->status)->toBe('None');
+    expect($order->fresh()->status)->toBe('None')
+        ->and($order->fresh()->factory_started_at)->not->toBeNull()
+        ->and($order->fresh()->factory_deadline->toDateString())->toBe(today()->addWeeks(2)->toDateString());
 
     $this->from(route('orders.edit', $order))
         ->patch(route('orders.production.update', $order), [

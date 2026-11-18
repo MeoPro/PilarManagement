@@ -17,7 +17,7 @@
     <section class="card order-detail-main">
         <div class="order-detail-heading">
             <h2>Produk</h2>
-            <span class="status-badge">{{ $order->is_urgent ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</span>
+            <span class="status-badge">{{ ($factoryWorkflow ? $order->is_factory_urgent : $order->is_urgent) ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</span>
         </div>
 
         <label for="order-product-status-filter">Filter produk</label>
@@ -211,7 +211,7 @@
                                     type="date"
                                     name="target_deadline"
                                     min="{{ now(auth()->user()->timezone())->toDateString() }}"
-                                    value="{{ $order->deadline?->greaterThanOrEqualTo(today(auth()->user()->timezone())) ? $order->deadline->format('Y-m-d') : now(auth()->user()->timezone())->toDateString() }}"
+                                    value="{{ ($order->factory_deadline ?? $order->deadline)?->greaterThanOrEqualTo(today(auth()->user()->timezone())) ? ($order->factory_deadline ?? $order->deadline)->format('Y-m-d') : now(auth()->user()->timezone())->toDateString() }}"
                                     required
                                 >
                                 <button class="btn btn-primary" type="submit">Tambah penugasan</button>
@@ -415,8 +415,11 @@
         <section class="card">
             <h2>Informasi Order</h2>
             <p><strong>SPK:</strong> {{ $order->order_id }}</p>
+            @if($factoryWorkflow)
+                <p><strong>Target PF:</strong> {{ $order->factory_deadline?->format('d M Y') ?? 'Belum dimulai' }}</p>
+            @endif
             <p><strong>Target Kirim:</strong> {{ $order->deadline?->format('d M Y') ?? '-' }}</p>
-            <p><strong>Status:</strong> {{ $order->is_urgent ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</p>
+            <p><strong>Status:</strong> {{ ($factoryWorkflow ? $order->is_factory_urgent : $order->is_urgent) ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</p>
             <p><strong>Terakhir diubah:</strong> {{ $order->last_edit?->format('d M Y H:i') ?? '-' }} WITA</p>
 
             @if($order->pending_deadline)
@@ -459,7 +462,7 @@
                         id="order-subcontractor-deadline"
                         type="date"
                         name="target_deadline"
-                        value="{{ $order->deadline?->format('Y-m-d') }}"
+                        value="{{ ($order->factory_deadline ?? $order->deadline)?->format('Y-m-d') }}"
                     >
                     <button class="btn btn-primary" type="submit">Alokasikan sisa order</button>
                 </form>

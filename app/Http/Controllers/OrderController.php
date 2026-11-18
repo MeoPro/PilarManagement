@@ -69,6 +69,7 @@ class OrderController extends Controller
         if (! array_key_exists($sort, $sortOptions)) {
             $sort = 'remaining_less';
         }
+        $deadlineSortExpression = $factoryWorkflow ? 'COALESCE(factory_deadline, deadline)' : 'deadline';
 
         $orderQuery = Order::query();
 
@@ -78,6 +79,8 @@ class OrderController extends Controller
                 'order_id',
                 'status',
                 'deadline',
+                'factory_deadline',
+                'factory_started_at',
                 'last_edit',
                 'created_at',
                 'updated_at',
@@ -126,14 +129,14 @@ class OrderController extends Controller
         match ($sort) {
             'oldest' => $orders->oldest('created_at')->oldest('id'),
             'most' => $orders->orderByDesc('items_sum_qty')
-                ->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
-                ->orderBy('deadline')
+                ->orderByRaw("CASE WHEN {$deadlineSortExpression} IS NULL THEN 1 ELSE 0 END")
+                ->orderByRaw($deadlineSortExpression)
                 ->oldest('created_at'),
-            'remaining_more' => $orders->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
-                ->orderByDesc('deadline')
+            'remaining_more' => $orders->orderByRaw("CASE WHEN {$deadlineSortExpression} IS NULL THEN 1 ELSE 0 END")
+                ->orderByRaw("{$deadlineSortExpression} DESC")
                 ->oldest('created_at'),
-            default => $orders->orderByRaw('CASE WHEN deadline IS NULL THEN 1 ELSE 0 END')
-                ->orderBy('deadline')
+            default => $orders->orderByRaw("CASE WHEN {$deadlineSortExpression} IS NULL THEN 1 ELSE 0 END")
+                ->orderByRaw($deadlineSortExpression)
                 ->oldest('created_at'),
         };
 
@@ -401,6 +404,8 @@ class OrderController extends Controller
                     'order_id',
                     'status',
                     'deadline',
+                    'factory_deadline',
+                    'factory_started_at',
                     'pending_deadline',
                     'pending_deadline_reason',
                     'pending_deadline_requested_by',
