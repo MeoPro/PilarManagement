@@ -68,6 +68,10 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
         ->name('order-products.quality.store');
+    Route::post('/order-item-services/{orderItemService}/result', [OrderProductController::class, 'recordServiceResult'])
+        ->middleware('menu:order_products')
+        ->whereNumber('orderItemService')
+        ->name('order-item-services.result.store');
     Route::post('/order-items/{orderItem}/piecework-assignments', [PieceworkAssignmentController::class, 'store'])
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
@@ -260,6 +264,12 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
     });
 
     Route::middleware('menu:orders')->group(function () {
+        Route::patch('/orders/{order}/deadline-change/approve', [OrderController::class, 'approveDeadlineChange'])
+            ->whereNumber('order')
+            ->name('orders.deadline-change.approve');
+        Route::patch('/orders/{order}/deadline-change/reject', [OrderController::class, 'rejectDeadlineChange'])
+            ->whereNumber('order')
+            ->name('orders.deadline-change.reject');
         Route::patch('/orders/{order}/production', [OrderController::class, 'updateProduction'])
             ->name('orders.production.update');
         Route::get('/orders', [OrderController::class, 'index'])->name('orders.index');

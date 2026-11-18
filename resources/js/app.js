@@ -8,6 +8,8 @@ import './order-product-rework';
 import './kanban-board';
 import './piecework-items';
 import './piecework-assignment-actions';
+import './stock-quality-dialogs';
+import './order-product-status-filter';
 import './attendance';
 import './employee-type';
 import './money-inputs';

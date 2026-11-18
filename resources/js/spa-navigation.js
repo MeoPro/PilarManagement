@@ -1,5 +1,15 @@
 let activeNavigationRequest = null;
 
+const setNavigationLoading = (isLoading) => {
+    const indicator = document.querySelector('.navigation-progress');
+    if (indicator) {
+        indicator.hidden = !isLoading;
+    }
+
+    document.body.classList.toggle('is-navigating', isLoading);
+    document.querySelector('.page-container')?.setAttribute('aria-busy', String(isLoading));
+};
+
 const activatePageScripts = (container) => {
     container.querySelectorAll('script').forEach((currentScript) => {
         const script = document.createElement('script');
@@ -77,6 +87,7 @@ const navigateTo = async (url, updateHistory = true) => {
     activeNavigationRequest?.abort();
     activeNavigationRequest = new AbortController();
     const request = activeNavigationRequest;
+    setNavigationLoading(true);
 
     try {
         const response = await fetch(url, {
@@ -100,6 +111,7 @@ const navigateTo = async (url, updateHistory = true) => {
     } finally {
         if (activeNavigationRequest === request) {
             activeNavigationRequest = null;
+            setNavigationLoading(false);
         }
     }
 };
@@ -172,6 +184,7 @@ document.addEventListener('submit', (event) => {
         activeNavigationRequest?.abort();
         activeNavigationRequest = new AbortController();
         const request = activeNavigationRequest;
+        setNavigationLoading(true);
 
         fetch(url.href, {
             method: (form.getAttribute('method') || 'GET').toUpperCase(),
@@ -203,6 +216,7 @@ document.addEventListener('submit', (event) => {
             .finally(() => {
                 if (activeNavigationRequest === request) {
                     activeNavigationRequest = null;
+                    setNavigationLoading(false);
                 }
             });
         return;

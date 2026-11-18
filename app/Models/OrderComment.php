@@ -16,6 +16,13 @@ class OrderComment extends Model
         'body',
     ];
 
+    protected static function booted(): void
+    {
+        static::created(fn (OrderComment $comment) => $comment->touchOrderActivity());
+        static::updated(fn (OrderComment $comment) => $comment->touchOrderActivity());
+        static::deleted(fn (OrderComment $comment) => $comment->touchOrderActivity());
+    }
+
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);
@@ -44,5 +51,15 @@ class OrderComment extends Model
     public function readRecipients(): HasMany
     {
         return $this->recipients()->whereNotNull('read_at');
+    }
+
+    private function touchOrderActivity(): void
+    {
+        Order::query()
+            ->whereKey($this->order_id)
+            ->update([
+                'last_edit' => now(),
+                'updated_at' => now(),
+            ]);
     }
 }

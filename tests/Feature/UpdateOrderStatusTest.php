@@ -218,6 +218,214 @@ test('guest list payment balance excludes cancelled orders and counts partial pa
         ->assertSee('Rp 75.000');
 });
 
+test('deadline order harus lebih dari hari ini', function () {
+    $guest = Guest::create(['name' => 'Deadline Guest']);
+    $order = Order::create([
+        'order_id' => 'ORD-DEADLINE-VALIDATION',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'total_order' => 100,
+        'deadline' => today()->addDays(10)->toDateString(),
+        'status' => 'None',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Deadline Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+        'factory_status' => 'Ready',
+    ]);
+
+    $this->put(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'deadline' => today()->toDateString(),
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Stock',
+            'status' => 'Ready',
+        ]],
+    ])->assertSessionHasErrors('deadline');
+
+    expect($order->fresh()->deadline->toDateString())->toBe(today()->addDays(10)->toDateString());
+});
+
+test('percepatan deadline produk produksi menunggu persetujuan PF dan dapat diperbarui', function () {
+    $guest = Guest::create(['name' => 'Deadline Request Guest']);
+    $currentDeadline = today()->addDays(30)->toDateString();
+    $firstRequestedDeadline = today()->addDays(20)->toDateString();
+    $updatedRequestedDeadline = today()->addDays(15)->toDateString();
+    $order = Order::create([
+        'order_id' => 'ORD-DEADLINE-REQUEST',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'total_order' => 100,
+        'deadline' => $currentDeadline,
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Deadline Production Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
+    $payload = [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Produksi',
+            'factory_status' => 'Produksi',
+        ]],
+    ];
+
+    $this->put(route('orders.update', $order), array_merge($payload, [
+        'deadline' => $firstRequestedDeadline,
+    ]))->assertSessionHasErrors('deadline_change_reason');
+
+    $this->put(route('orders.update', $order), array_merge($payload, [
+        'deadline' => $firstRequestedDeadline,
+        'deadline_change_reason' => 'Perlu percepatan jadwal kirim.',
+    ]))->assertRedirect(route('orders.index'));
+
+    expect($order->fresh()->deadline->toDateString())->toBe($currentDeadline)
+        ->and($order->fresh()->pending_deadline->toDateString())->toBe($firstRequestedDeadline)
+        ->and($order->fresh()->pending_deadline_reason)->toBe('Perlu percepatan jadwal kirim.');
+
+    $this->put(route('orders.update', $order), array_merge($payload, [
+        'deadline' => $updatedRequestedDeadline,
+        'deadline_change_reason' => 'Jadwal pengiriman diperbarui.',
+    ]))->assertRedirect(route('orders.index'));
+
+    expect($order->fresh()->deadline->toDateString())->toBe($currentDeadline)
+        ->and($order->fresh()->pending_deadline->toDateString())->toBe($updatedRequestedDeadline)
+        ->and($order->fresh()->pending_deadline_reason)->toBe('Jadwal pengiriman diperbarui.')
+        ->and($order->events()->where('type', 'deadline_change_requested')->count())->toBe(2);
+});
+
+test('percepatan deadline tanpa produk produksi langsung memperbarui deadline aktif', function () {
+    $guest = Guest::create(['name' => 'Direct Deadline Guest']);
+    $currentDeadline = today()->addDays(30)->toDateString();
+    $newDeadline = today()->addDays(15)->toDateString();
+    $order = Order::create([
+        'order_id' => 'ORD-DEADLINE-DIRECT',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'total_order' => 100,
+        'deadline' => $currentDeadline,
+        'status' => 'None',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Deadline Ready Product',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+        'factory_status' => 'Ready',
+    ]);
+
+    $this->put(route('orders.update', $order), [
+        'order_id' => $order->order_id,
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Lokal',
+        'order_type' => 'Bali',
+        'deadline' => $newDeadline,
+        'items' => [[
+            'id' => $item->id,
+            'product' => $item->product,
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Stock',
+            'status' => 'Ready',
+        ]],
+    ])->assertRedirect(route('orders.index'));
+
+    expect($order->fresh()->deadline->toDateString())->toBe($newDeadline)
+        ->and($order->fresh()->pending_deadline)->toBeNull();
+});
+
+test('PF dapat menyetujui pengajuan deadline dan tanggal aktif berubah', function () {
+    $requester = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $order = Order::create([
+        'order_id' => 'ORD-DEADLINE-APPROVE',
+        'guest_name' => 'Deadline Guest',
+        'total_order' => 100,
+        'deadline' => today()->addDays(30)->toDateString(),
+        'pending_deadline' => today()->addDays(20)->toDateString(),
+        'pending_deadline_reason' => 'Perlu percepatan jadwal kirim.',
+        'pending_deadline_requested_by' => $requester->id,
+        'pending_deadline_requested_at' => now(),
+        'status' => 'Proses Produksi',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('orders.show', $order))
+        ->assertOk()
+        ->assertSee('Pengajuan Percepatan Deadline')
+        ->assertSee('Setujui deadline')
+        ->assertSee('Tolak pengajuan');
+
+    $this->from(route('orders.show', $order))
+        ->patch(route('orders.deadline-change.approve', $order))
+        ->assertRedirect(route('orders.show', $order))
+        ->assertSessionHas('success');
+
+    expect($order->fresh()->deadline->toDateString())->toBe(today()->addDays(20)->toDateString())
+        ->and($order->fresh()->pending_deadline)->toBeNull()
+        ->and($order->events()->where('type', 'deadline_change_approved')->exists())->toBeTrue();
+});
+
+test('PF dapat menolak pengajuan deadline tanpa mengubah tanggal aktif', function () {
+    $requester = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $currentDeadline = today()->addDays(30)->toDateString();
+    $order = Order::create([
+        'order_id' => 'ORD-DEADLINE-REJECT',
+        'guest_name' => 'Deadline Guest',
+        'total_order' => 100,
+        'deadline' => $currentDeadline,
+        'pending_deadline' => today()->addDays(20)->toDateString(),
+        'pending_deadline_reason' => 'Perlu percepatan jadwal kirim.',
+        'pending_deadline_requested_by' => $requester->id,
+        'pending_deadline_requested_at' => now(),
+        'status' => 'Proses Produksi',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('orders.show', $order))
+        ->patch(route('orders.deadline-change.reject', $order), [
+            'decision_note' => 'Belum dapat dipenuhi.',
+        ])
+        ->assertRedirect(route('orders.show', $order))
+        ->assertSessionHas('success');
+
+    expect($order->fresh()->deadline->toDateString())->toBe($currentDeadline)
+        ->and($order->fresh()->pending_deadline)->toBeNull()
+        ->and($order->events()->where('type', 'deadline_change_rejected')->value('description'))
+        ->toContain('Belum dapat dipenuhi.');
+});
+
 test('order menyimpan total pembayaran dan menolak pembayaran melebihi total', function () {
     $guest = Guest::create(['name' => 'Payment Guest']);
     $payload = [
@@ -828,7 +1036,7 @@ test('index menyediakan empat pilihan pengurutan order', function () {
             'qty' => $qty,
             'price' => 1,
             'source' => 'Order',
-            'status' => 'Produksi',
+            'status' => $order->id === $completedOrder->id ? 'Ready' : 'Produksi',
         ]);
     }
 
@@ -866,6 +1074,15 @@ test('index menyediakan empat pilihan pengurutan order', function () {
 
     $lessTimeResponse = $this->get(route('orders.index', ['search' => 'ORD-SORT-', 'sort' => 'remaining_less']));
     $lessTimeResponse->assertSeeInOrder([
+        'ORD-SORT-CLOSEST',
+        'ORD-SORT-MOST',
+        'ORD-SORT-OLDEST',
+        'ORD-SORT-FURTHEST',
+        'ORD-SORT-COMPLETED',
+    ])->assertSee('value="remaining_less" selected', false);
+
+    $defaultResponse = $this->get(route('orders.index', ['search' => 'ORD-SORT-']));
+    $defaultResponse->assertSeeInOrder([
         'ORD-SORT-CLOSEST',
         'ORD-SORT-MOST',
         'ORD-SORT-OLDEST',
@@ -1153,7 +1370,7 @@ test('produk Stock baru masuk antrean distribusi PB dan tidak muncul di Factory'
     $order = Order::where('order_id', 'ORD-003')->firstOrFail();
     $item = $order->items()->firstOrFail();
 
-    expect($order->status)->toBe('None')
+    expect($order->status)->toBe('Distribusi')
         ->and($order->guest_source)->toBe('Online')
         ->and($item->status)->toBe('Distribusi')
         ->and($item->factory_status)->toBe('None')
@@ -1241,6 +1458,26 @@ test('order changes to production when every product enters production', functio
         ])
         ->assertRedirect(route('orders.edit', $order));
 
+    expect($order->fresh()->status)->toBe('Proses Produksi')
+        ->and($firstItem->fresh()->factory_status)->toBe('None')
+        ->and($secondItem->fresh()->factory_status)->toBe('None');
+
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['order_products'],
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->patch(route('order-products.factory-drawing.update', $firstItem), [
+            'factory_drawing_image' => UploadedFile::fake()->create('chair-work-drawing.jpg', 100, 'image/jpeg'),
+        ])
+        ->assertRedirect();
+
+    expect($order->fresh()->status)->toBe('Proses Produksi');
+
+    $this->patch(route('order-products.factory-drawing.update', $secondItem), [
+        'factory_drawing_image' => UploadedFile::fake()->create('table-work-drawing.jpg', 100, 'image/jpeg'),
+    ])->assertRedirect();
+
     $this->assertDatabaseHas('orders', [
         'id' => $order->id,
         'status' => 'Proses Produksi',
@@ -1255,7 +1492,7 @@ test('order changes to production when every product enters production', functio
     ]);
 });
 
-test('order status updates when all item statuses change through model updates', function () {
+test('order status follows PB production while PF drawings are pending', function () {
     $order = Order::create([
         'order_id' => 'MODEL-PRODUCTION-STATUS',
         'guest_name' => 'Model Status Guest',
@@ -1283,6 +1520,17 @@ test('order status updates when all item statuses change through model updates',
     $secondItem->update(['status' => 'Produksi']);
 
     expect($order->fresh()->status)->toBe('Proses Produksi');
+
+    $firstItem->update(['factory_drawing_image' => 'orders/factory-drawings/model-chair.jpg']);
+    $order->synchronizeProductionStatusFromItems();
+    expect($order->fresh()->status)->toBe('Proses Produksi');
+
+    $secondItem->update(['factory_drawing_image' => 'orders/factory-drawings/model-table.jpg']);
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Proses Produksi')
+        ->and($firstItem->fresh()->factory_status)->toBe('None')
+        ->and($secondItem->fresh()->factory_status)->toBe('None');
 });
 
 test('stale new order status is reconciled when the order edit page is opened', function () {
@@ -1299,6 +1547,7 @@ test('stale new order status is reconciled when the order edit page is opened', 
             'price' => 100,
             'source' => 'Order',
             'status' => 'Produksi',
+            'factory_drawing_image' => 'orders/factory-drawings/stale-chair.jpg',
         ],
         [
             'product' => 'Stale Production Table',
@@ -1306,6 +1555,7 @@ test('stale new order status is reconciled when the order edit page is opened', 
             'price' => 100,
             'source' => 'Order',
             'status' => 'Produksi',
+            'factory_drawing_image' => 'orders/factory-drawings/stale-table.jpg',
         ],
     ]);
 
@@ -1367,7 +1617,7 @@ test('order returns to new when an unstarted product is added to an order in pro
     $this->assertDatabaseHas('order_events', [
         'order_id' => $order->id,
         'type' => 'order_status_changed',
-        'description' => 'ADD-ITEM-AFTER-PRODUCTION: Proses Produksi -> None (menunggu mockup produk baru)',
+        'description' => 'ADD-ITEM-AFTER-PRODUCTION: Proses Produksi -> None (menunggu mockup PB dan gambar kerja PF untuk produk baru)',
     ]);
 
     expect($order->fresh()->status)->toBe('None')
@@ -1565,11 +1815,205 @@ test('Stock items do not block made-to-order items from starting production', fu
         'source' => 'Order',
         'status' => 'Produksi',
         'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/ready-for-pf.jpg',
     ]);
 
     $order->synchronizeProductionStatusFromItems();
 
     expect($order->fresh()->status)->toBe('Proses Produksi');
+});
+
+test('mixed ready Stock and made-to-order items keep the order in finishing', function () {
+    $order = Order::create([
+        'order_id' => 'MIXED-STOCK-READY-STATUS',
+        'guest_name' => 'Mixed Stock Ready Guest',
+        'total_order' => 200,
+        'status' => 'Selesai',
+    ]);
+    $order->items()->createMany([
+        [
+            'product' => 'Ready Stock Chair',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Stock',
+            'status' => 'Ready',
+        ],
+        [
+            'product' => 'Ready Made To Order Table',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Ready',
+        ],
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Finishing');
+});
+
+test('mixed ready and production items keep the order in production', function () {
+    $order = Order::create([
+        'order_id' => 'MIXED-PRODUCTION-STATUS',
+        'guest_name' => 'Mixed Production Guest',
+        'total_order' => 300,
+        'status' => 'None',
+    ]);
+    $order->items()->createMany([
+        [
+            'product' => 'Production Chair',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Produksi',
+            'factory_drawing_image' => 'orders/factory-drawings/production-chair.jpg',
+            'factory_status' => 'None',
+        ],
+        [
+            'product' => 'Production Table',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Produksi',
+            'factory_drawing_image' => 'orders/factory-drawings/production-table.jpg',
+            'factory_status' => 'None',
+        ],
+        [
+            'product' => 'Ready Shelf',
+            'qty' => 1,
+            'price' => 100,
+            'source' => 'Order',
+            'status' => 'Ready',
+        ],
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Proses Produksi')
+        ->and($order->items()->where('status', 'Produksi')->pluck('factory_status')->unique()->all())->toBe(['None']);
+});
+
+test('active service takes precedence over ready items and completed order status', function () {
+    $order = Order::create([
+        'order_id' => 'SERVICE-ORDER-STATUS',
+        'guest_name' => 'Service Status Guest',
+        'total_order' => 200,
+        'status' => 'Selesai',
+    ]);
+    $serviceItem = $order->items()->create([
+        'product' => 'Serviced Chair',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+    ]);
+    $order->items()->create([
+        'product' => 'Ready Table',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+    ]);
+    $serviceItem->services()->create([
+        'quantity' => 1,
+        'status' => 'Service',
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Service');
+});
+
+test('active service takes precedence over distributed made-to-order items', function () {
+    $order = Order::create([
+        'order_id' => 'SERVICE-AND-DISTRIBUTION-STATUS',
+        'guest_name' => 'Service and Distribution Guest',
+        'total_order' => 200,
+        'status' => 'Distribusi',
+    ]);
+    $serviceItem = $order->items()->create([
+        'product' => 'Serviced Stock Chair',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Stock',
+        'status' => 'Ready',
+    ]);
+    $order->items()->create([
+        'product' => 'Distributed Table',
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Distribusi',
+    ]);
+    $serviceItem->services()->create([
+        'quantity' => 1,
+        'status' => 'Service',
+    ]);
+
+    $order->synchronizeProductionStatusFromItems();
+
+    expect($order->fresh()->status)->toBe('Service');
+});
+
+test('service orders are available in the order status filter', function () {
+    $order = Order::create([
+        'order_id' => 'SERVICE-STATUS-FILTER',
+        'guest_name' => 'Service Filter Guest',
+        'total_order' => 100,
+        'status' => 'Service',
+    ]);
+
+    $this->get(route('orders.index', ['status' => 'Service']))
+        ->assertOk()
+        ->assertSee($order->order_id)
+        ->assertSee('order-status-tab is-service is-active', false)
+        ->assertSee('order-status-pill is-service', false);
+});
+
+test('packing and distribution orders are available in the order status filter', function () {
+    foreach (['Packing', 'Distribusi'] as $status) {
+        $order = Order::create([
+            'order_id' => "STATUS-FILTER-{$status}",
+            'guest_name' => "{$status} Filter Guest",
+            'total_order' => 100,
+            'status' => $status,
+        ]);
+
+        $this->get(route('orders.index', ['status' => $status]))
+            ->assertSee($order->order_id)
+            ->assertSeeText($status)
+            ->assertSee(
+                $status === 'Distribusi'
+                    ? 'order-status-tab is-distribution is-active'
+                    : 'order-status-tab is-packing is-active',
+                false,
+            )
+            ->assertSee(
+                $status === 'Distribusi'
+                    ? 'order-status-pill is-distribution'
+                    : 'order-status-pill is-packing',
+                false,
+            );
+    }
+});
+
+test('factory dashboard counts packing and distribution as active orders', function () {
+    foreach (['Packing', 'Distribusi'] as $index => $status) {
+        Order::create([
+            'order_id' => "DASHBOARD-ACTIVE-{$index}",
+            'guest_name' => "Active Order Guest {$index}",
+            'total_order' => 100,
+            'status' => $status,
+        ]);
+    }
+
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['orders'],
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('admin.index'))
+        ->assertSeeInOrder(['Order berjalan', '<strong>2</strong>'], false);
 });
 
 test('Stock backfill moves only unstarted items into PB distribution', function () {
@@ -1837,7 +2281,7 @@ test('status order otomatis menjadi selesai saat semua produk ready', function (
     $response->assertRedirect(route('orders.index'));
     $response->assertSessionDoesntHaveErrors();
 
-    expect($order->fresh()->status)->toBe('Selesai')
+    expect($order->fresh()->status)->toBe('Finishing')
         ->and($order->fresh()->guest_source)->toBe('Touris')
         ->and($firstItem->fresh()->status)->toBe('Ready')
         ->and($secondItem->fresh()->status)->toBe('Ready');

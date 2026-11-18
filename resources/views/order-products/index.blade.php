@@ -25,8 +25,10 @@
             @if(count($statuses) > 1)
                 <select name="status" aria-label="Filter status produk">
                     <option value="">Semua Status</option>
-                    @foreach($statuses as $status)
-                        <option value="{{ $status }}" @selected($statusFilter === $status)>{{ $status }}</option>
+                    @foreach($statusOptions as $status)
+                        <option value="{{ $status }}" @selected($statusFilter === $status)>
+                            {{ $factoryUser && $status === 'None' ? 'New' : ($status === 'Produksi' && ! $factoryUser ? 'Produksi (QC Stock)' : $status) }}
+                        </option>
                     @endforeach
                 </select>
             @endif
@@ -57,6 +59,10 @@
                 <tbody>
                     @forelse($items as $item)
                         @php($factoryCompleted = $factoryUser && $item->factory_status === 'Packing')
+                        @php($stockFactoryReady = $item->source !== 'Stock'
+                            || ((int) $item->quality_unchecked_quantity === 0
+                                && (int) $item->service_quantity === 0
+                                && (int) $item->packed_quantity === 0))
                         <tr @class(['factory-complete-row' => $factoryCompleted])>
                             @php($itemProductStatuses = $factoryUser
                                 ? ($item->factory_status === 'Distribusi'
@@ -128,6 +134,7 @@
                                         @if($item->activeSubcontractorAssignments->isEmpty()
                                             && $item->factory_status === 'Produksi'
                                             && filled($item->factory_drawing_image)
+                                            && $stockFactoryReady
                                             && $item->factory_qty_remaining > 0)
                                             <form action="{{ route('order-items.piecework-assignments.store', $item) }}" method="POST" class="compact-form">
                                                 @csrf
@@ -164,6 +171,7 @@
 
                                     @if($item->factory_status === 'Produksi'
                                         && filled($item->factory_drawing_image)
+                                        && $stockFactoryReady
                                         && $item->factory_quantity > $item->qty_completed)
                                         <form action="{{ route('order-products.subcontractor-assignments.store', $item) }}" method="POST" class="compact-form">
                                             @csrf
@@ -210,7 +218,7 @@
                             <td>
                                 @if($factoryCompleted)
                                     {{ $item->qty_completed }}
-                                @elseif($factoryUser)
+                                @elseif($factoryUser || $item->source === 'Stock')
                                     {{ $item->qty_completed }}
                                 @else
                                     <label class="sr-only" for="qty-completed-{{ $item->id }}">Sudah dikerjakan untuk {{ $item->product }}</label>
@@ -234,20 +242,26 @@
                             <td>{{ $item->color ?? '-' }}</td>
                             <td>
                                 @if($factoryUser)
-                                    <strong>{{ $item->factory_status }}</strong>
-                                    @if($item->factory_status === 'Produksi')
+                                    <strong>{{ $item->factory_status === 'None' || ($item->status === 'Produksi' && $item->source !== 'Stock' && blank($item->factory_drawing_image)) ? 'New' : $item->factory_status }}</strong>
+                                    @if($item->factory_status === 'Produksi' && filled($item->factory_drawing_image))
                                         <p>Produksi tersisa: {{ $item->factory_qty_remaining }} unit</p>
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>
                                     @endif
+                                    @if(in_array($item->status, ['Distribusi', 'Produksi'], true)
+                                        && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0)
+                                        && blank($item->factory_drawing_image))
+                                        <p class="muted">Menunggu gambar kerja PF sebelum produksi dimulai.</p>
+                                    @endif
                                     @if((int) $item->quality_damaged_quantity > 0)
                                         <span class="stagnant-product-warning" role="alert">
-                                            Produk rusak menunggu finishing ulang: {{ $item->quality_damaged_quantity }} unit.
+                                            {{ $item->source === 'Stock' ? 'Produk Stock rusak menunggu produksi ulang' : 'Produk rusak menunggu finishing ulang' }}: {{ $item->quality_damaged_quantity }} unit.
                                         </span>
                                     @endif
-                                    @if($item->factory_status === 'Produksi')
+                                    @if(in_array($item->status, ['Distribusi', 'Produksi'], true)
+                                        && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0))
                                         @if($item->factory_drawing_image)
                                             <a href="{{ Storage::disk('public')->url($item->factory_drawing_image) }}" target="_blank" rel="noopener">Lihat gambar kerja</a>
-                                        @else
+                                        @elseif($item->factory_status === 'Produksi')
                                             <span class="muted">Belum ada gambar kerja; produk belum dapat ditugaskan.</span>
                                         @endif
                                         <form action="{{ route('order-products.factory-drawing.update', $item) }}" method="POST" enctype="multipart/form-data" class="compact-form">
@@ -269,6 +283,29 @@
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>
                                     @elseif($item->factory_status === 'Packing')
                                         <p>Dalam perjalanan / menunggu pemeriksaan PB: {{ $item->packed_quantity }} unit</p>
+                                    @endif
+                                @elseif($item->source === 'Stock'
+                                    && (in_array($item->status, ['Distribusi', 'Dalam Perjalanan'], true)
+                                        || ($item->status === 'Produksi' && $item->quality_unchecked_quantity > 0)
+                                        || $item->service_quantity > 0))
+                                    @php($stockInspectionQuantity = $item->status === 'Dalam Perjalanan'
+                                        ? (int) $item->packed_quantity
+                                        : $item->quality_unchecked_quantity)
+                                    @if($stockInspectionQuantity > 0)
+                                        <div class="stock-quality-actions">
+                                            @foreach(['Bagus', 'Rusak', 'Kurang'] as $qualityResult)
+                                                <button
+                                                    type="button"
+                                                    class="{{ $qualityResult === 'Bagus' ? 'btn primary' : 'btn' }}"
+                                                    data-stock-quality-result="{{ $qualityResult }}"
+                                                    data-stock-quality-url="{{ route('order-products.quality.store', $item) }}"
+                                                    data-stock-quality-max="{{ $stockInspectionQuantity }}"
+                                                    data-stock-quality-product="{{ $item->product }}"
+                                                >
+                                                    {{ $qualityResult }}
+                                                </button>
+                                            @endforeach
+                                        </div>
                                     @endif
                                 @elseif($item->status === 'Dalam Perjalanan')
                                     <p>Belum diperiksa: {{ $item->quality_unchecked_quantity }} / {{ $item->qty }} unit</p>
@@ -311,19 +348,21 @@
                                         <span class="form-error">{{ $message }}</span>
                                     @enderror
                                 @endif
-                                <label for="status-image-{{ $item->id }}">Mockup produk (maksimal 10 foto)</label>
-                                <input
-                                    id="status-image-{{ $item->id }}"
-                                    type="file"
-                                    name="items[{{ $item->id }}][status_images][]"
-                                    form="update-order-product-{{ $item->id }}"
-                                    accept="image/jpeg,image/png,image/webp"
-                                    multiple
-                                    data-status-photo-input
-                                >
-                                @error("items.{$item->id}.status_images")
-                                    <span class="form-error">{{ $message }}</span>
-                                @enderror
+                                @unless($factoryUser || $item->source === 'Stock')
+                                    <label for="status-image-{{ $item->id }}">Mockup produk (maksimal 10 foto)</label>
+                                    <input
+                                        id="status-image-{{ $item->id }}"
+                                        type="file"
+                                        name="items[{{ $item->id }}][status_images][]"
+                                        form="update-order-product-{{ $item->id }}"
+                                        accept="image/jpeg,image/png,image/webp"
+                                        multiple
+                                        data-status-photo-input
+                                    >
+                                    @error("items.{$item->id}.status_images")
+                                        <span class="form-error">{{ $message }}</span>
+                                    @enderror
+                                @endunless
                             </td>
                             <td>{{ $item->order->deadline?->format('d/m/Y') ?? '-' }}</td>
                             <td>
@@ -344,7 +383,36 @@
                                 @endif
                             </td>
                             <td>
-                                @unless($factoryUser || $item->status === 'Dalam Perjalanan')
+                                @if(! $factoryUser && $item->source === 'Stock')
+                                    @foreach($item->services as $service)
+                                        <form
+                                            action="{{ route('order-item-services.result.store', $service) }}"
+                                            method="POST"
+                                            class="compact-form"
+                                        >
+                                            @csrf
+                                            <strong>Service {{ $service->severity }} · {{ $service->quantity }} unit</strong>
+                                            <label for="service-quantity-{{ $service->id }}">Jumlah diproses</label>
+                                            <div class="stock-quality-quantity-control">
+                                                <input
+                                                    id="service-quantity-{{ $service->id }}"
+                                                    type="number"
+                                                    name="quantity"
+                                                    min="1"
+                                                    max="{{ $service->quantity }}"
+                                                    value="{{ $service->quantity }}"
+                                                    required
+                                                >
+                                                <button type="button" class="btn" data-service-fill-all>Semua</button>
+                                            </div>
+                                            <div class="stock-quality-actions">
+                                                <button class="btn primary" type="submit" name="result" value="Bagus">Bagus</button>
+                                                <button class="btn" type="submit" name="result" value="Rusak">Rusak · kirim PF</button>
+                                            </div>
+                                        </form>
+                                    @endforeach
+                                @endif
+                                @unless($factoryUser || $item->status === 'Dalam Perjalanan' || $item->source === 'Stock')
                                     <form
                                         id="update-order-product-{{ $item->id }}"
                                         action="{{ route('order-products.update', $item) }}"
@@ -375,6 +443,50 @@
                 </tbody>
             </table>
         </div>
+
+        @unless($factoryUser)
+            <dialog
+                class="stock-quality-dialog"
+                data-stock-quality-dialog
+                aria-labelledby="stock-quality-dialog-title"
+                aria-describedby="stock-quality-dialog-description"
+            >
+                <form method="POST" class="stock-quality-form" data-stock-quality-form>
+                    @csrf
+                    <h2 id="stock-quality-dialog-title" data-stock-quality-title>Pemeriksaan Stock</h2>
+                    <p id="stock-quality-dialog-description" data-stock-quality-description></p>
+                    <input type="hidden" name="result" data-stock-quality-result-value>
+                    <div data-stock-quality-severity-field hidden>
+                        <label for="stock-quality-dialog-severity">Tingkat kerusakan</label>
+                        <select
+                            id="stock-quality-dialog-severity"
+                            name="severity"
+                            data-stock-quality-severity
+                        >
+                            <option value="">Pilih tingkat kerusakan</option>
+                            <option value="Ringan">Ringan · Service di PB</option>
+                            <option value="Parah">Parah · Kirim ke PF/Produksi</option>
+                        </select>
+                    </div>
+                    <label for="stock-quality-dialog-quantity">Jumlah yang diperiksa</label>
+                    <div class="stock-quality-quantity-control">
+                        <input
+                            id="stock-quality-dialog-quantity"
+                            type="number"
+                            name="quantity"
+                            min="1"
+                            required
+                            data-stock-quality-quantity
+                        >
+                        <button type="button" class="btn" data-stock-quality-fill-all>Semua</button>
+                    </div>
+                    <div class="stock-quality-dialog-actions">
+                        <button type="button" class="btn" data-stock-quality-close>Batal</button>
+                        <button type="submit" class="btn primary" data-stock-quality-submit>Simpan hasil QC</button>
+                    </div>
+                </form>
+            </dialog>
+        @endunless
 
         {{ $items->links() }}
     </section>

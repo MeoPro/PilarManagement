@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
 class Order extends Model
 {
@@ -19,6 +20,12 @@ class Order extends Model
         'total_order',
         'paid_amount',
         'deadline',
+        'pending_deadline',
+        'pending_deadline_reason',
+        'pending_deadline_requested_by',
+        'pending_deadline_requested_at',
+        'factory_deadline',
+        'factory_started_at',
         'last_edit',
         'status',
         'note',
@@ -26,10 +33,49 @@ class Order extends Model
 
     protected $casts = [
         'deadline' => 'date',
+        'pending_deadline' => 'date',
+        'pending_deadline_requested_at' => 'datetime',
+        'factory_deadline' => 'date',
+        'factory_started_at' => 'datetime',
         'last_edit' => 'datetime',
         'total_order' => 'decimal:2',
         'paid_amount' => 'decimal:2',
     ];
+
+    protected static function booted(): void
+    {
+        static::updating(function (Order $order): void {
+            if ($order->isDirty('deadline') && $order->factory_started_at !== null) {
+                $order->factory_deadline = $order->calculateFactoryDeadline();
+            }
+
+            $order->last_edit = now();
+        });
+    }
+
+    /**
+     * Mark the order's first production handoff and freeze its internal deadline.
+     */
+    public function startFactoryWork(): void
+    {
+        if ($this->factory_started_at !== null) {
+            return;
+        }
+
+        $this->factory_started_at = now();
+        $this->factory_deadline = $this->calculateFactoryDeadline();
+        $this->save();
+    }
+
+    public function getIsUrgentAttribute(): bool
+    {
+        return $this->isUrgentForDeadline($this->deadline);
+    }
+
+    public function getIsFactoryUrgentAttribute(): bool
+    {
+        return $this->isUrgentForDeadline($this->factory_deadline ?? $this->deadline);
+    }
 
     public function items(): HasMany
     {
@@ -49,6 +95,11 @@ class Order extends Model
     public function guest(): BelongsTo
     {
         return $this->belongsTo(Guest::class);
+    }
+
+    public function pendingDeadlineRequestedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'pending_deadline_requested_by');
     }
 
     public function canBeDeleted(): bool
@@ -75,25 +126,43 @@ class Order extends Model
         });
     }
 
-    public function getIsUrgentAttribute(): bool
+    private function isUrgentForDeadline(?Carbon $deadline): bool
     {
         if (in_array($this->status, ['Selesai', 'Cancel'])) {
             return false;
         }
 
-        if ($this->deadline) {
-            $daysRemaining = (int) today()->diffInDays($this->deadline, false);
+        if ($deadline !== null) {
+            $daysRemaining = (int) today()->diffInDays($deadline, false);
 
             if ($daysRemaining <= 14) {
                 return true;
             }
         }
 
-        if (! $this->last_edit) {
-            return false;
+        $lastActivityAt = $this->last_edit ?? $this->updated_at ?? $this->created_at;
+
+        return $lastActivityAt !== null && $lastActivityAt->lessThanOrEqualTo(now()->subDays(7));
+    }
+
+    private function calculateFactoryDeadline(): ?string
+    {
+        if ($this->factory_started_at === null || $this->deadline === null) {
+            return null;
         }
 
-        return $this->last_edit->diffInDays(now()) >= 7;
+        $factoryStart = $this->factory_started_at->copy()->startOfDay();
+        $deliveryDeadline = $this->deadline->copy()->startOfDay();
+        $twoMonthFactoryWindow = $factoryStart->copy()->addMonthsNoOverflow(2);
+        $factoryDeadline = $deliveryDeadline->greaterThanOrEqualTo($twoMonthFactoryWindow)
+            ? $deliveryDeadline->copy()->subMonthNoOverflow()
+            : $deliveryDeadline->copy()->subWeek();
+
+        if ($factoryDeadline->lessThan($factoryStart)) {
+            $factoryDeadline = $factoryStart;
+        }
+
+        return $factoryDeadline->toDateString();
     }
 
     public function getDisplayStatusAttribute(): string
@@ -142,18 +211,7 @@ class Order extends Model
 
     public function synchronizeProductionStatusFromItems(?EloquentCollection $items = null): void
     {
-        if (in_array($this->status, ['Selesai', 'Cancel'], true)) {
-            return;
-        }
-
-        $productionItems = $items?->reject(fn (OrderItem $item): bool => $item->source === 'Stock');
-
-        if ($items !== null && (
-            $this->status !== 'None'
-            || $items->isEmpty()
-            || $productionItems->isEmpty()
-            || $productionItems->contains(fn (OrderItem $item): bool => $item->status !== 'Produksi')
-        )) {
+        if ($this->status === 'Cancel') {
             return;
         }
 
@@ -161,34 +219,86 @@ class Order extends Model
             ? $this->items()
                 ->selectRaw(
                     'COUNT(*) AS total_items,
-                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS ready_items,
-                    SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS production_items,
-                    SUM(CASE WHEN source != ? THEN 1 ELSE 0 END) AS production_total_items,
-                    SUM(CASE WHEN source != ? AND status IN (?, ?) THEN 1 ELSE 0 END) AS finishing_items,
-                    SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS distributed_items',
-                    ['Ready', 'Stock', 'Produksi', 'Stock', 'Stock', 'Finishing', 'Dalam Perjalanan', 'Stock', 'Distribusi'],
+                    SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS new_order_items,
+                    SUM(CASE WHEN EXISTS (SELECT 1 FROM order_item_services AS services WHERE services.order_item_id = order_items.id AND services.status = ? AND services.quantity > 0) THEN 1 ELSE 0 END) AS service_items,
+                    SUM(CASE WHEN status IN (?, ?) OR factory_status IN (?, ?) THEN 1 ELSE 0 END) AS production_items,
+                    SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS finishing_items,
+                    SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS packing_items,
+                    SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS distributed_order_items,
+                    SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS stock_items,
+                    SUM(CASE WHEN source != ? THEN 1 ELSE 0 END) AS order_items,
+                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS ready_items',
+                    [
+                        'Stock',
+                        'None',
+                        'Service',
+                        'Produksi',
+                        'Produksi',
+                        'Produksi',
+                        'Produksi',
+                        'Stock',
+                        'Finishing',
+                        'Finishing',
+                        'Stock',
+                        'Packing',
+                        'Packing',
+                        'Stock',
+                        'Distribusi',
+                        'Distribusi',
+                        'Stock',
+                        'Stock',
+                        'Ready',
+                    ],
                 )
                 ->first()
             : (object) [
                 'total_items' => $items->count(),
+                'new_order_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock' && $item->status === 'None')
+                    ->count(),
+                'service_items' => OrderItemService::query()
+                    ->whereIn('order_item_id', $items->modelKeys())
+                    ->where('status', 'Service')
+                    ->where('quantity', '>', 0)
+                    ->distinct()
+                    ->count('order_item_id'),
+                'production_items' => $items
+                    ->filter(fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true))
+                    ->count(),
+                'finishing_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock'
+                        && in_array('Finishing', [$item->status, $item->factory_status], true))
+                    ->count(),
+                'packing_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock'
+                        && in_array('Packing', [$item->status, $item->factory_status], true))
+                    ->count(),
+                'distributed_order_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock'
+                        && in_array('Distribusi', [$item->status, $item->factory_status], true))
+                    ->count(),
+                'stock_items' => $items->where('source', 'Stock')->count(),
+                'order_items' => $items->where('source', '!=', 'Stock')->count(),
                 'ready_items' => $items->where('status', 'Ready')->count(),
-                'production_items' => $productionItems->where('status', 'Produksi')->count(),
-                'production_total_items' => $productionItems->count(),
-                'finishing_items' => $productionItems->whereIn('status', ['Finishing', 'Dalam Perjalanan'])->count(),
-                'distributed_items' => $productionItems->where('status', 'Distribusi')->count(),
             ];
 
         if (! $itemStatuses || (int) $itemStatuses->total_items === 0) {
             return;
         }
 
+        $hasMixedStockItems = (int) $itemStatuses->stock_items > 0
+            && (int) $itemStatuses->order_items > 0;
+
         $nextStatus = match (true) {
-            (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
-            (int) $itemStatuses->production_total_items > 0
-                && (int) $itemStatuses->production_items === (int) $itemStatuses->production_total_items => 'Proses Produksi',
-            (int) $itemStatuses->production_total_items > 0
-                && (int) $itemStatuses->distributed_items === (int) $itemStatuses->production_total_items => 'Finishing',
+            (int) $itemStatuses->new_order_items > 0 => 'None',
+            (int) $itemStatuses->production_items > 0 => 'Proses Produksi',
             (int) $itemStatuses->finishing_items > 0 => 'Finishing',
+            $hasMixedStockItems && (int) $itemStatuses->service_items === 0 => 'Finishing',
+            (int) $itemStatuses->packing_items > 0 => 'Packing',
+            (int) $itemStatuses->service_items > 0 => 'Service',
+            (int) $itemStatuses->distributed_order_items > 0 => 'Distribusi',
+            (int) $itemStatuses->stock_items > 0 => 'Distribusi',
+            (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
             default => null,
         };
 
@@ -204,7 +314,7 @@ class Order extends Model
         $this->events()->create([
             'type' => 'order_status_changed',
             'title' => 'Status order berubah otomatis',
-            'description' => "{$this->order_id}: {$previousStatus} -> {$nextStatus} (berdasarkan status seluruh produk)",
+            'description' => "{$this->order_id}: {$previousStatus} -> {$nextStatus} (berdasarkan tahapan produk)",
             'occurred_at' => now(),
         ]);
     }

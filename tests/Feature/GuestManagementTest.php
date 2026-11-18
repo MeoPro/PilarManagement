@@ -114,6 +114,37 @@ test('guest edit form shows saved phone fields and an add-number button', functi
         ->assertSee('+ Tambah Nomor');
 });
 
+test('new order form can autofill the selected guest source and phone', function () {
+    $guest = Guest::create([
+        'name' => 'Returning Guest',
+        'address' => 'Jl. Contoh No. 10',
+    ]);
+    Order::create([
+        'order_id' => 'RETURNING-GUEST-ORDER',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'guest_source' => 'Instagram',
+        'phone' => '08123456789',
+        'total_order' => 10000,
+        'status' => 'None',
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())
+        ->get(route('orders.create'))
+        ->assertSee('oninput="updateGuestPhone(this)"', false)
+        ->assertSee('onchange="updateGuestPhone(this)"', false)
+        ->assertSee('<option value="Returning Guest"></option>', false)
+        ->assertSee("form.querySelector('[name=\"guest_address\"]')", false)
+        ->assertViewHas('guests', function ($guests) use ($guest): bool {
+            $savedGuest = $guests->firstWhere('id', $guest->id);
+
+            return $savedGuest?->guest_source === 'Instagram'
+                && $savedGuest?->address === 'Jl. Contoh No. 10'
+                && $savedGuest?->phone === '08123456789'
+                && $savedGuest?->phones->isEmpty();
+        });
+});
+
 test('guest edit requires a valid name', function () {
     $guest = Guest::create(['name' => 'Existing Guest']);
 

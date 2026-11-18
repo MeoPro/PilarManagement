@@ -32,13 +32,14 @@ const updateDeadlineControl = (control, source = 'date') => {
     const daysInput = control.querySelector('[data-deadline-days]');
     const isLocked = control.dataset.deadlineLocked === 'true';
     const today = control.dataset.deadlineToday;
+    const minimumDays = Number(control.dataset.deadlineMinimumDays ?? 0);
 
     dateInput.readOnly = isLocked;
     daysInput.readOnly = isLocked;
 
     if (source === 'days' && !isLocked) {
         const days = Number(daysInput.value);
-        if (daysInput.value === '' || !Number.isInteger(days) || days < 0) {
+        if (daysInput.value === '' || !Number.isInteger(days) || days < minimumDays) {
             dateInput.value = '';
             return;
         }
@@ -48,7 +49,7 @@ const updateDeadlineControl = (control, source = 'date') => {
     }
 
     const duration = (utcDateValue(dateInput.value) - utcDateValue(today)) / (24 * 60 * 60 * 1000);
-    if (!Number.isInteger(duration) || duration < 0) {
+    if (!Number.isInteger(duration) || duration < minimumDays) {
         daysInput.value = '';
         return;
     }

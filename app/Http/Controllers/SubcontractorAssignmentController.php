@@ -34,6 +34,23 @@ class SubcontractorAssignmentController extends Controller
                 ]);
             }
 
+            if ($item->source === 'Stock' && (int) $item->quality_damaged_quantity === 0) {
+                throw ValidationException::withMessages([
+                    'subcontractor_id' => 'Produk Stock hanya dapat dialokasikan setelah masuk ke pekerjaan PF.',
+                ]);
+            }
+
+            if ($item->source === 'Stock'
+                && (blank($item->factory_drawing_image)
+                    || $item->factory_status !== 'Produksi'
+                    || (int) $item->quality_unchecked_quantity > 0
+                    || (int) $item->service_quantity > 0
+                    || (int) $item->packed_quantity > 0)) {
+                throw ValidationException::withMessages([
+                    'subcontractor_id' => 'Selesaikan pemeriksaan PB dan pastikan gambar kerja serta status Produksi PF tersedia sebelum alokasi.',
+                ]);
+            }
+
             $subcontractor = Subcontractor::query()->findOrFail($validated['subcontractor_id']);
             if (! $subcontractor->is_active) {
                 throw ValidationException::withMessages([
@@ -114,7 +131,20 @@ class SubcontractorAssignmentController extends Controller
             }
 
             $createdAssignments = 0;
-            foreach ($lockedOrder->items()->lockForUpdate()->get() as $item) {
+            foreach ($lockedOrder->items()
+                ->withSum(['services as pending_service_quantity' => fn ($query) => $query->where('status', 'Service')], 'quantity')
+                ->lockForUpdate()
+                ->get() as $item) {
+                if ($item->source === 'Stock'
+                    && ((int) $item->quality_damaged_quantity === 0
+                        || blank($item->factory_drawing_image)
+                        || $item->factory_status !== 'Produksi'
+                        || (int) $item->quality_unchecked_quantity > 0
+                        || (int) $item->service_quantity > 0
+                        || (int) $item->packed_quantity > 0)) {
+                    continue;
+                }
+
                 if (in_array($item->factory_status, ['Distribusi', 'Ready'], true)) {
                     continue;
                 }

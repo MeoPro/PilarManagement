@@ -20,6 +20,18 @@ class OrderEvent extends Model
         'occurred_at' => 'datetime',
     ];
 
+    protected static function booted(): void
+    {
+        static::created(function (OrderEvent $event): void {
+            Order::query()
+                ->whereKey($event->order_id)
+                ->update([
+                    'last_edit' => $event->occurred_at ?? now(),
+                    'updated_at' => now(),
+                ]);
+        });
+    }
+
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);

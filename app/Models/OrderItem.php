@@ -56,6 +56,11 @@ class OrderItem extends Model
             $orderItem->factory_status ??= $orderItem->status ?? 'None';
         });
 
+        static::created(function (OrderItem $orderItem): void {
+            $orderItem->touchOrderActivity();
+            $orderItem->startFactoryWorkIfNeeded();
+        });
+
         static::updating(function (OrderItem $orderItem): void {
             if ($orderItem->isDirty('qty_completed')) {
                 $orderItem->qty_progress_updated_at = now();
@@ -63,15 +68,39 @@ class OrderItem extends Model
         });
 
         static::updated(function (OrderItem $orderItem): void {
+            $orderItem->touchOrderActivity();
+            $orderItem->startFactoryWorkIfNeeded();
+
             if ($orderItem->wasChanged('status') && $orderItem->status === 'Produksi') {
                 $orderItem->order()->first()?->synchronizeProductionStatusFromItems();
             }
+        });
+
+        static::deleted(function (OrderItem $orderItem): void {
+            $orderItem->touchOrderActivity();
         });
     }
 
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);
+    }
+
+    private function touchOrderActivity(): void
+    {
+        Order::query()
+            ->whereKey($this->order_id)
+            ->update([
+                'last_edit' => now(),
+                'updated_at' => now(),
+            ]);
+    }
+
+    private function startFactoryWorkIfNeeded(): void
+    {
+        if (in_array('Produksi', [$this->status, $this->factory_status], true)) {
+            $this->order()->first()?->startFactoryWork();
+        }
     }
 
     public function category(): BelongsTo
@@ -109,6 +138,11 @@ class OrderItem extends Model
         return $this->hasMany(FinishingAssignment::class);
     }
 
+    public function services(): HasMany
+    {
+        return $this->hasMany(OrderItemService::class);
+    }
+
     public function activeSubcontractorAssignments(): HasMany
     {
         return $this->subcontractorAssignments()->whereNull('cancelled_at');
@@ -124,8 +158,11 @@ class OrderItem extends Model
         $assignedQuantity = array_key_exists('active_subcontracted_quantity', $this->attributes)
             ? (int) ($this->attributes['active_subcontracted_quantity'] ?? 0)
             : $this->activeSubcontractedQuantity();
+        $workQuantity = $this->source === 'Stock' && (int) $this->quality_damaged_quantity > 0
+            ? (int) $this->quality_damaged_quantity
+            : (int) $this->qty;
 
-        return max(0, (int) $this->qty - $assignedQuantity);
+        return max(0, $workQuantity - $assignedQuantity);
     }
 
     public function getFactoryQtyRemainingAttribute(): int
@@ -134,7 +171,7 @@ class OrderItem extends Model
             0,
             $this->factory_quantity
                 - (int) $this->qty_completed
-                - (int) $this->quality_short_quantity,
+                - ($this->source === 'Stock' ? 0 : (int) $this->quality_short_quantity),
         );
     }
 
@@ -176,13 +213,62 @@ class OrderItem extends Model
 
     public function getQualityUncheckedQuantityAttribute(): int
     {
+        $pendingServiceQuantity = $this->source === 'Stock'
+            ? $this->getPendingServiceQuantity()
+            : 0;
+
         return max(
             0,
             (int) $this->qty
                 - (int) $this->quality_good_quantity
                 - (int) $this->quality_damaged_quantity
-                - (int) $this->quality_short_quantity,
+                - (int) $this->quality_short_quantity
+                - $pendingServiceQuantity,
         );
+    }
+
+    public function getServiceQuantityAttribute(): int
+    {
+        return $this->source === 'Stock'
+            ? $this->getPendingServiceQuantity()
+            : 0;
+    }
+
+    public function getCompletedQuantityAttribute(): int
+    {
+        $qualityCompletedQuantity = (int) $this->quality_good_quantity + (int) $this->quality_short_quantity;
+
+        return $this->status === 'Ready'
+            ? max((int) $this->qty, $qualityCompletedQuantity)
+            : $qualityCompletedQuantity;
+    }
+
+    public function getProductionQuantityAttribute(): int
+    {
+        if ($this->status !== 'Produksi') {
+            return 0;
+        }
+
+        return $this->source === 'Stock'
+            ? (int) $this->quality_damaged_quantity
+            : max(0, (int) $this->qty - (int) $this->qty_completed - (int) $this->quality_short_quantity);
+    }
+
+    private function getPendingServiceQuantity(): int
+    {
+        if (array_key_exists('pending_service_quantity', $this->attributes)) {
+            return (int) $this->attributes['pending_service_quantity'];
+        }
+
+        if ($this->relationLoaded('services')) {
+            return (int) $this->services
+                ->where('status', 'Service')
+                ->sum('quantity');
+        }
+
+        return (int) $this->services()
+            ->where('status', 'Service')
+            ->sum('quantity');
     }
 
     public function getQualityShortageAvailableAttribute(): int

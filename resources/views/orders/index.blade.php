@@ -129,7 +129,10 @@
                             @php($statusClass = match($order->status) {
                                 'None' => 'pending',
                                 'Proses Produksi' => 'processing',
+                                'Service' => 'service',
                                 'Finishing' => 'finishing',
+                                'Packing' => 'packing',
+                                'Distribusi' => 'distribution',
                                 'Selesai' => 'completed',
                                 'Cancel' => 'cancelled',
                                 default => 'pending',

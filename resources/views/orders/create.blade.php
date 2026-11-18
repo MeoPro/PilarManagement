@@ -84,6 +84,7 @@
                             placeholder="Pilih tamu atau ketik nama baru"
                             autocomplete="off"
                             oninput="updateGuestPhone(this)"
+                            onchange="updateGuestPhone(this)"
                             required
                         >
                         <input type="hidden" name="guest_id" value="{{ old('guest_id') }}">
@@ -167,6 +168,7 @@
                     class="form-group order-form-deadline-control"
                     data-deadline-control
                     data-deadline-today="{{ today()->toDateString() }}"
+                    data-deadline-minimum-days="1"
                 >
                     <label for="deadline-date">Deadline tanggal</label>
                     <input
@@ -175,13 +177,14 @@
                         class="date-input"
                         name="deadline"
                         value="{{ old('deadline') }}"
+                        min="{{ today()->addDay()->toDateString() }}"
                         data-deadline-date
                     >
                     <label for="deadline-days">Atau dalam hari</label>
                     <input
                         id="deadline-days"
                         type="number"
-                        min="0"
+                        min="1"
                         step="1"
                         data-deadline-days
                         aria-label="Jumlah hari sampai deadline"
@@ -1122,15 +1125,22 @@
         const normalizedValue = input.value.trim().toLocaleLowerCase();
         const matchingGuest = guests.find(guest => guest.name.toLocaleLowerCase() === normalizedValue);
         const guestWrapper = input.closest('.guest-wrapper');
+        const guestIdInput = guestWrapper.querySelector('[name="guest_id"]');
+        const previousGuestId = guestIdInput.value;
+        const form = input.closest('form');
 
-        guestWrapper.querySelector('[name="guest_id"]').value = matchingGuest?.id ?? '';
+        guestIdInput.value = matchingGuest?.id ?? '';
         guestWrapper.querySelector('[name="guest_name"]').value = matchingGuest?.name ?? input.value.trim();
-        input.closest('.row').querySelector('[name="guest_address"]').value = matchingGuest?.address ?? '';
+        form.querySelector('[name="guest_address"]').value = matchingGuest?.address ?? '';
         setGuestSource(matchingGuest?.guest_source ?? '');
 
-        const phoneInput = input.closest('.row').querySelector('[name="phone"]');
-        if (matchingGuest && !phoneInput.value) {
-            phoneInput.value = matchingGuest.phones?.at(-1)?.phone ?? '';
+        const phoneInput = form.querySelector('[name="phone"]');
+        const matchingPhone = matchingGuest?.phone ?? matchingGuest?.phones?.at(-1)?.phone ?? '';
+
+        if (matchingGuest && matchingPhone) {
+            phoneInput.value = matchingPhone;
+        } else if (previousGuestId && String(previousGuestId) !== String(matchingGuest?.id ?? '')) {
+            phoneInput.value = '';
         }
     }
 

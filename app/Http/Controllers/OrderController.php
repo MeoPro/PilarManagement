@@ -15,6 +15,7 @@ use App\Models\Subcontractor;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -47,7 +48,7 @@ class OrderController extends Controller
         $search = trim((string) $request->query('search', ''));
         $orderType = (string) $request->query('order_type', '');
         $orderTypes = ['Bali', 'Luar Bali', 'Ekspor'];
-        $statusOptions = ['None', 'Proses Produksi', 'Finishing', 'Selesai', 'Cancel'];
+        $statusOptions = ['None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai', 'Cancel'];
         $statusFilter = (string) $request->query('status', '');
 
         if (! in_array($orderType, $orderTypes, true)) {
@@ -72,11 +73,18 @@ class OrderController extends Controller
         $orderQuery = Order::query();
 
         if (! $canManageSales) {
-            $orderQuery->select(['id', 'order_id', 'status', 'deadline', 'last_edit']);
+            $orderQuery->select([
+                'id',
+                'order_id',
+                'status',
+                'deadline',
+                'last_edit',
+                'created_at',
+                'updated_at',
+            ]);
 
             if ($factoryWorkflow) {
-                $orderQuery->whereHas('items', fn (Builder $query) => $query
-                    ->whereIn('factory_status', $factoryItemStatuses));
+                $orderQuery->whereHas('items', fn (Builder $query) => $this->applyFactoryItemVisibility($query));
             }
         }
 
@@ -93,7 +101,7 @@ class OrderController extends Controller
                 ]
                 : [
                     'items' => fn ($query) => $query
-                        ->when($factoryWorkflow, fn ($query) => $query->whereIn('factory_status', $factoryItemStatuses))
+                        ->when($factoryWorkflow, fn (Builder $query) => $this->applyFactoryItemVisibility($query))
                         ->select('id', 'order_id', 'product', 'category_id', 'qty', 'qty_completed', 'factory_status', 'color', 'source', 'status', 'image')
                         ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
                         ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
@@ -109,7 +117,11 @@ class OrderController extends Controller
                 : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
             ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType))
             ->when($statusFilter !== '', fn (Builder $query) => $query->where('status', $statusFilter))
-            ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', ['Selesai']);
+            ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', ['Selesai'])
+            ->orderByRaw(
+                'CASE WHEN status NOT IN (?, ?) AND COALESCE(last_edit, updated_at, created_at) <= ? THEN 0 ELSE 1 END',
+                ['Selesai', 'Cancel', now()->subDays(7)],
+            );
 
         match ($sort) {
             'oldest' => $orders->oldest('created_at')->oldest('id'),
@@ -134,8 +146,8 @@ class OrderController extends Controller
         }
 
         $orderStats = Order::query()->selectRaw(
-            'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
-            ['None', 'None', 'Proses Produksi', 'Finishing', 'Selesai'],
+            'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
+            ['None', 'None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai'],
         )->first();
 
         if ($canManageSales) {
@@ -150,8 +162,7 @@ class OrderController extends Controller
                 : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
             ->when(
                 $factoryWorkflow && ! $canManageSales,
-                fn (Builder $query) => $query->whereHas('items', fn (Builder $itemQuery) => $itemQuery
-                    ->whereIn('factory_status', $factoryItemStatuses)),
+                fn (Builder $query) => $query->whereHas('items', fn (Builder $itemQuery) => $this->applyFactoryItemVisibility($itemQuery)),
             )
             ->when($orderType !== '', fn (Builder $query) => $query->where('order_type', $orderType));
         $statusCounts = $statusCountsQuery
@@ -163,6 +174,9 @@ class OrderController extends Controller
             ['value' => 'None', 'label' => 'New', 'class' => 'pending'],
             ['value' => 'Proses Produksi', 'label' => 'Produksi', 'class' => 'processing'],
             ['value' => 'Finishing', 'label' => 'Finishing', 'class' => 'finishing'],
+            ['value' => 'Packing', 'label' => 'Packing', 'class' => 'packing'],
+            ['value' => 'Distribusi', 'label' => 'Distribusi', 'class' => 'distribution'],
+            ['value' => 'Service', 'label' => 'Service', 'class' => 'service'],
             ['value' => 'Selesai', 'label' => 'Selesai', 'class' => 'completed'],
             ['value' => 'Cancel', 'label' => 'Batal', 'class' => 'cancelled'],
         ];
@@ -333,7 +347,7 @@ class OrderController extends Controller
                     'color' => $this->catalogColor($item, $catalogProduct),
                     'source' => $item['source'],
                     'status' => $initialStatus,
-                    'factory_status' => $item['source'] === 'Stock' ? 'None' : $initialStatus,
+                    'factory_status' => 'None',
                     'image' => $imagePath,
                     'status_image' => $statusImagePaths[0] ?? null,
                     'status_images' => $statusImagePaths ?: null,
@@ -343,6 +357,7 @@ class OrderController extends Controller
             $order->update([
                 'total_order' => $total,
             ]);
+            $order->synchronizeProductionStatusFromItems();
         });
 
         return redirect()
@@ -367,25 +382,34 @@ class OrderController extends Controller
                     ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
                     ->orderBy('id'),
                 'items.category',
+                'items.services',
                 'guest',
                 'items.pieceworkAssignments' => fn ($query) => $query
                     ->with('employee')
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
+                'pendingDeadlineRequestedBy:id,name',
                 'events',
             ]);
             $order->synchronizeProductionStatusFromItems($order->items);
         } else {
             abort_unless($factoryWorkflow, 403);
-            abort_unless(
-                $order->items()->whereIn('factory_status', self::FACTORY_ORDER_ITEM_STATUSES)->exists(),
-                404,
-            );
+            $hasVisibleFactoryItems = $this->applyFactoryItemVisibility($order->items()->getQuery())->exists();
+            abort_unless($hasVisibleFactoryItems || $order->pending_deadline !== null, 404);
             $order = Order::query()
-                ->select(['id', 'order_id', 'status', 'deadline', 'last_edit'])
+                ->select([
+                    'id',
+                    'order_id',
+                    'status',
+                    'deadline',
+                    'pending_deadline',
+                    'pending_deadline_reason',
+                    'pending_deadline_requested_by',
+                    'pending_deadline_requested_at',
+                    'last_edit',
+                ])
                 ->findOrFail($order->id);
             $order->load([
-                'items' => fn ($query) => $query
-                    ->whereIn('factory_status', self::FACTORY_ORDER_ITEM_STATUSES)
+                'items' => fn ($query) => $this->applyFactoryItemVisibility($query->getQuery())
                     ->select(
                         'id',
                         'order_id',
@@ -397,7 +421,9 @@ class OrderController extends Controller
                         'factory_status',
                         'factory_drawing_image',
                         'packed_quantity',
+                        'quality_good_quantity',
                         'quality_damaged_quantity',
+                        'quality_short_quantity',
                         'color',
                         'source',
                         'status',
@@ -410,12 +436,14 @@ class OrderController extends Controller
                     ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
                     ->orderBy('id'),
                 'items.category',
+                'items.services',
                 'items.pieceworkItems.employee',
                 'items.pieceworkItems.attendance.employee',
                 'items.pieceworkAssignments' => fn ($query) => $query
                     ->with('employee')
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
                 'items.activeSubcontractorAssignments.subcontractor',
+                'pendingDeadlineRequestedBy:id,name',
                 'events',
             ]);
         }
@@ -462,12 +490,21 @@ class OrderController extends Controller
                 ->withCount('readRecipients'),
         ]);
 
+        $productStatusCounts = [
+            'Selesai' => $order->items->sum(fn (OrderItem $item): int => $item->completed_quantity),
+            'Produksi' => $order->items->sum(fn (OrderItem $item): int => $item->production_quantity),
+            'Service' => $order->items->sum(fn (OrderItem $item): int => $item->service_quantity),
+        ];
+        $canReviewDeadlineChange = $factoryWorkflow && $order->pending_deadline !== null;
+
         return view('orders.show', compact(
             'order',
             'salesWorkflow',
             'factoryWorkflow',
             'canAssignSubcontractors',
             'canAssignPiecework',
+            'productStatusCounts',
+            'canReviewDeadlineChange',
             'factoryEmployees',
             'subcontractors',
         ));
@@ -513,6 +550,12 @@ class OrderController extends Controller
                 $previousStatus = $item->status;
                 $nextStatus = $itemData['status'];
                 $statusPhotos = $this->statusPhotosFromRequest($request, "items.$itemIndex");
+
+                if ($item->source === 'Stock' && ($nextStatus !== $previousStatus || $statusPhotos !== [])) {
+                    throw ValidationException::withMessages([
+                        "items.{$itemIndex}.status" => 'Status produk Stock hanya dapat diperbarui melalui pemeriksaan kualitas PB.',
+                    ]);
+                }
 
                 if ($previousStatus !== 'None'
                     && ($nextStatus !== $previousStatus || $statusPhotos !== [])) {
@@ -563,7 +606,11 @@ class OrderController extends Controller
                     'status' => $nextStatus,
                     'factory_status' => $item->activeSubcontractorAssignments()->exists()
                         ? $item->factory_status
-                        : $nextStatus,
+                        : ($nextStatus === 'Produksi'
+                            && $item->source !== 'Stock'
+                            && blank($item->factory_drawing_image)
+                                ? 'None'
+                                : $nextStatus),
                     'status_image' => $statusImagePath,
                     'status_images' => $statusImagePaths ?: null,
                 ]);
@@ -602,6 +649,9 @@ class OrderController extends Controller
     {
         $order->load(['items.category', 'items.catalogProduct', 'guest']);
         $order->synchronizeProductionStatusFromItems($order->items);
+        $hasProductionWorkItems = $order->items->contains(
+            fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true),
+        );
 
         $categories = Category::orderBy('name')->get();
         $colors = Color::orderBy('name')->pluck('name');
@@ -611,7 +661,15 @@ class OrderController extends Controller
         $productOptions = $this->productOptions();
         $catalogProducts = $this->catalogProductOptions();
 
-        return view('orders.edit', compact('order', 'categories', 'colors', 'guests', 'productOptions', 'catalogProducts'));
+        return view('orders.edit', compact(
+            'order',
+            'categories',
+            'colors',
+            'guests',
+            'productOptions',
+            'catalogProducts',
+            'hasProductionWorkItems',
+        ));
     }
 
     public function update(Request $request, Order $order)
@@ -621,14 +679,34 @@ class OrderController extends Controller
         $catalogProducts = $this->catalogProductsForItems($validated['items']);
 
         DB::transaction(function () use ($request, $validated, $order, $catalogProducts) {
+            $order = Order::query()->lockForUpdate()->findOrFail($order->id);
             $guest = $this->resolveGuest($validated);
             $guest->update(['guest_source' => $validated['guest_source']]);
 
             $total = 0;
             $previousDeadline = $order->deadline?->toDateString();
+            $previousPendingDeadline = $order->pending_deadline?->toDateString();
             $previousItems = $order->items()
+                ->with('services:id,order_item_id')
                 ->get()
                 ->keyBy('id');
+            $newDeadline = $validated['deadline'] ?? null;
+            $deadlineChanged = $previousDeadline !== $newDeadline;
+            $hasProductionWorkItems = $previousItems->contains(
+                fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true),
+            );
+            $requiresDeadlineApproval = $deadlineChanged
+                && $previousDeadline !== null
+                && $newDeadline !== null
+                && $newDeadline < $previousDeadline
+                && $hasProductionWorkItems;
+
+            if ($requiresDeadlineApproval && blank($validated['deadline_change_reason'] ?? null)) {
+                throw ValidationException::withMessages([
+                    'deadline_change_reason' => 'Alasan wajib diisi untuk pengajuan percepatan deadline.',
+                ]);
+            }
+
             $submittedItemIds = collect($validated['items'])
                 ->pluck('id')
                 ->filter()
@@ -639,7 +717,8 @@ class OrderController extends Controller
                     $query->where('qty_completed', '>', 0)
                         ->orWhereIn('status', ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Dalam Perjalanan', 'Packing', 'Ready'])
                         ->orWhereIn('factory_status', ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Packing', 'Ready'])
-                        ->orWhereHas('activeSubcontractorAssignments');
+                        ->orWhereHas('activeSubcontractorAssignments')
+                        ->orWhereHas('services');
                 })
                 ->when($submittedItemIds !== [], fn (Builder $query): Builder => $query->whereNotIn('id', $submittedItemIds))
                 ->lockForUpdate()
@@ -662,6 +741,7 @@ class OrderController extends Controller
                     ! in_array($previousItem->status, $lockedStatuses, true)
                     && ! in_array($previousItem->factory_status, $lockedStatuses, true)
                     && (int) $previousItem->qty_completed === 0
+                    && $previousItem->services->isEmpty()
                 )) {
                     continue;
                 }
@@ -691,7 +771,26 @@ class OrderController extends Controller
                 }
             }
 
-            $order->update([
+            $deadlineAttributes = [
+                'deadline' => $requiresDeadlineApproval ? $previousDeadline : $newDeadline,
+            ];
+            if ($requiresDeadlineApproval) {
+                $deadlineAttributes = array_merge($deadlineAttributes, [
+                    'pending_deadline' => $newDeadline,
+                    'pending_deadline_reason' => trim($validated['deadline_change_reason']),
+                    'pending_deadline_requested_by' => $request->user()->id,
+                    'pending_deadline_requested_at' => now(),
+                ]);
+            } elseif ($deadlineChanged) {
+                $deadlineAttributes = array_merge($deadlineAttributes, [
+                    'pending_deadline' => null,
+                    'pending_deadline_reason' => null,
+                    'pending_deadline_requested_by' => null,
+                    'pending_deadline_requested_at' => null,
+                ]);
+            }
+
+            $order->update(array_merge([
                 'order_id' => $validated['order_id'],
                 'guest_id' => $guest->id,
                 'guest_name' => $guest->name,
@@ -699,13 +798,30 @@ class OrderController extends Controller
                 'order_type' => $validated['order_type'] ?? null,
                 'phone' => $validated['phone'] ?? null,
                 'paid_amount' => $validated['paid_amount'],
-                'deadline' => $validated['deadline'] ?? null,
                 'last_edit' => now(),
                 'note' => $validated['note'] ?? null,
-            ]);
+            ], $deadlineAttributes));
 
-            $newDeadline = $validated['deadline'] ?? null;
-            if ($previousDeadline !== $newDeadline) {
+            if ($requiresDeadlineApproval) {
+                $this->recordOrderEvent(
+                    $order,
+                    'deadline_change_requested',
+                    $previousPendingDeadline === null
+                        ? 'Percepatan deadline diajukan'
+                        : 'Pengajuan percepatan deadline diperbarui',
+                    "{$order->order_id}: {$previousDeadline} -> {$newDeadline}. "
+                        .'Alasan: '.$validated['deadline_change_reason'],
+                );
+            } elseif ($deadlineChanged) {
+                if ($previousPendingDeadline !== null) {
+                    $this->recordOrderEvent(
+                        $order,
+                        'deadline_change_cancelled',
+                        'Pengajuan percepatan deadline dibatalkan',
+                        "{$order->order_id}: pengajuan {$previousPendingDeadline} dibatalkan karena deadline aktif diubah.",
+                    );
+                }
+
                 $this->recordOrderEvent(
                     $order,
                     'deadline_changed',
@@ -718,7 +834,7 @@ class OrderController extends Controller
             $this->rememberGuestPhone($guest->id, $validated['phone'] ?? null);
 
             $existingItemIds = [];
-            $hasNewUnstartedProducts = false;
+            $hasNewFactoryWorkItems = false;
 
             foreach ($request->items as $index => $item) {
                 $itemId = $item['id'] ?? null;
@@ -886,7 +1002,11 @@ class OrderController extends Controller
                         'status' => $hasActiveSubcontractorAssignments ? $orderItem->status : $itemStatus,
                         'factory_status' => $hasActiveSubcontractorAssignments
                             ? ($itemStatus === 'Ready' ? 'Ready' : $orderItem->factory_status)
-                            : ($item['source'] === 'Stock' && $itemStatus === 'Distribusi' ? 'None' : $itemStatus),
+                            : ($item['source'] === 'Stock' && $itemStatus === 'Distribusi'
+                                ? 'None'
+                                : ($itemStatus === 'Produksi' && blank($orderItem->factory_drawing_image)
+                                    ? 'None'
+                                    : $itemStatus)),
                         'qty_completed' => $completedQuantity,
                         'image' => $imagePath,
                         'status_image' => $statusImagePath,
@@ -947,7 +1067,7 @@ class OrderController extends Controller
                     $initialStatus = $item['source'] === 'Stock'
                         ? 'Distribusi'
                         : ($hasCatalogMockup ? 'Produksi' : 'None');
-                    $hasNewUnstartedProducts = $hasNewUnstartedProducts || $initialStatus === 'None';
+                    $hasNewFactoryWorkItems = $hasNewFactoryWorkItems || $item['source'] !== 'Stock';
                     $newItem = $order->items()->create([
                         'product' => $item['product'],
                         'product_id' => $catalogProduct?->id,
@@ -959,7 +1079,7 @@ class OrderController extends Controller
                         'color' => $this->catalogColor($item, $catalogProduct),
                         'source' => $item['source'],
                         'status' => $initialStatus,
-                        'factory_status' => $item['source'] === 'Stock' ? 'None' : $initialStatus,
+                        'factory_status' => 'None',
                         'image' => $imagePath,
                         'status_image' => $statusImagePaths[0] ?? null,
                         'status_images' => $statusImagePaths ?: null,
@@ -994,9 +1114,8 @@ class OrderController extends Controller
             $order->update([
                 'total_order' => $total,
             ]);
-            $order->synchronizeProductionStatusFromItems();
 
-            if ($hasNewUnstartedProducts && ! in_array($order->status, ['None', 'Selesai', 'Cancel'], true)) {
+            if ($hasNewFactoryWorkItems && ! in_array($order->status, ['None', 'Cancel'], true)) {
                 $previousStatus = $order->status;
                 $order->update([
                     'status' => 'None',
@@ -1006,14 +1125,101 @@ class OrderController extends Controller
                     $order,
                     'order_status_changed',
                     'Status order berubah otomatis',
-                    "{$order->order_id}: {$previousStatus} -> None (menunggu mockup produk baru)",
+                    "{$order->order_id}: {$previousStatus} -> None (menunggu mockup PB dan gambar kerja PF untuk produk baru)",
                 );
+            } else {
+                $order->synchronizeProductionStatusFromItems();
             }
         });
 
         return redirect()
             ->route('orders.index')
             ->with('success', 'Order berhasil diperbarui.');
+    }
+
+    public function approveDeadlineChange(Request $request, Order $order): RedirectResponse
+    {
+        abort_unless($request->user()->isFactoryWorkflow(), 403);
+
+        DB::transaction(function () use ($order): void {
+            $order = Order::query()->lockForUpdate()->findOrFail($order->id);
+            $pendingDeadline = $order->pending_deadline;
+
+            if ($pendingDeadline === null) {
+                throw ValidationException::withMessages([
+                    'pending_deadline' => 'Tidak ada pengajuan deadline yang menunggu persetujuan.',
+                ]);
+            }
+
+            if ($pendingDeadline->lessThanOrEqualTo(today())) {
+                throw ValidationException::withMessages([
+                    'pending_deadline' => 'Tanggal pengajuan sudah hari ini atau terlewat. Minta PB mengajukan tanggal baru.',
+                ]);
+            }
+
+            $pendingReason = $order->pending_deadline_reason;
+            $order->update([
+                'deadline' => $pendingDeadline->toDateString(),
+                'pending_deadline' => null,
+                'pending_deadline_reason' => null,
+                'pending_deadline_requested_by' => null,
+                'pending_deadline_requested_at' => null,
+                'last_edit' => now(),
+            ]);
+
+            $this->recordOrderEvent(
+                $order,
+                'deadline_change_approved',
+                'Percepatan deadline disetujui PF',
+                "{$order->order_id}: deadline diubah menjadi {$pendingDeadline->toDateString()}. "
+                    .'Alasan pengajuan: '.($pendingReason ?? '-'),
+            );
+        });
+
+        return back()->with('success', 'Pengajuan percepatan deadline berhasil disetujui.');
+    }
+
+    public function rejectDeadlineChange(Request $request, Order $order): RedirectResponse
+    {
+        abort_unless($request->user()->isFactoryWorkflow(), 403);
+
+        $validated = $request->validate([
+            'decision_note' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        DB::transaction(function () use ($order, $validated): void {
+            $order = Order::query()->lockForUpdate()->findOrFail($order->id);
+            $pendingDeadline = $order->pending_deadline?->toDateString();
+
+            if ($pendingDeadline === null) {
+                throw ValidationException::withMessages([
+                    'pending_deadline' => 'Tidak ada pengajuan deadline yang menunggu persetujuan.',
+                ]);
+            }
+
+            $reason = $order->pending_deadline_reason;
+            $order->update([
+                'pending_deadline' => null,
+                'pending_deadline_reason' => null,
+                'pending_deadline_requested_by' => null,
+                'pending_deadline_requested_at' => null,
+                'last_edit' => now(),
+            ]);
+
+            $description = "{$order->order_id}: pengajuan {$pendingDeadline} ditolak PF. Alasan PB: ".($reason ?? '-');
+            if (filled($validated['decision_note'] ?? null)) {
+                $description .= ' Catatan PF: '.trim($validated['decision_note']);
+            }
+
+            $this->recordOrderEvent(
+                $order,
+                'deadline_change_rejected',
+                'Percepatan deadline ditolak PF',
+                $description,
+            );
+        });
+
+        return back()->with('success', 'Pengajuan percepatan deadline ditolak.');
     }
 
     public function destroy(Order $order)
@@ -1101,7 +1307,8 @@ class OrderController extends Controller
             'phone' => 'nullable|string|max:50',
             'paid_amount' => ['nullable', 'numeric', 'min:0'],
 
-            'deadline' => 'nullable|date',
+            'deadline' => 'nullable|date|after:today',
+            'deadline_change_reason' => ['nullable', 'string', 'max:1000'],
 
             'note' => 'nullable|string',
 
@@ -1389,14 +1596,17 @@ class OrderController extends Controller
             ->orderByRaw('LOWER(name)')
             ->get(['id', 'name', 'guest_source', 'address']);
         $guestsWithoutSource = $guests
-            ->whereNull('guest_source')
+            ->filter(fn (Guest $guest): bool => blank($guest->guest_source))
             ->modelKeys();
 
-        if ($guestsWithoutSource === []) {
-            return $guests;
-        }
-
         $latestOrdersByGuest = Order::query()
+            ->whereIn('guest_id', $guests->modelKeys())
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->get(['guest_id', 'guest_source', 'phone'])
+            ->unique('guest_id')
+            ->keyBy('guest_id');
+        $latestSourcesByGuest = Order::query()
             ->whereIn('guest_id', $guestsWithoutSource)
             ->whereNotNull('guest_source')
             ->where('guest_source', '!=', '')
@@ -1406,13 +1616,17 @@ class OrderController extends Controller
             ->unique('guest_id')
             ->keyBy('guest_id');
 
-        return $guests->each(function (Guest $guest) use ($latestOrdersByGuest): void {
+        return $guests->each(function (Guest $guest) use ($latestOrdersByGuest, $latestSourcesByGuest): void {
+            $latestOrder = $latestOrdersByGuest->get($guest->id);
+
             if (blank($guest->guest_source)) {
                 $guest->setAttribute(
                     'guest_source',
-                    $latestOrdersByGuest->get($guest->id)?->guest_source,
+                    $latestSourcesByGuest->get($guest->id)?->guest_source,
                 );
             }
+
+            $guest->setAttribute('phone', $latestOrder?->phone);
         });
     }
 
@@ -1778,8 +1992,30 @@ class OrderController extends Controller
                     ->where('product', 'like', "%{$search}%")
                     ->when(
                         $factoryItemStatuses !== null,
-                        fn (Builder $itemQuery) => $itemQuery->whereIn('factory_status', $factoryItemStatuses),
+                        fn (Builder $itemQuery) => $this->applyFactoryItemVisibility($itemQuery),
                     ));
+        });
+    }
+
+    private function applyFactoryItemVisibility(Builder $query): Builder
+    {
+        return $query->where(function (Builder $query): void {
+            $query->whereIn('factory_status', self::FACTORY_ORDER_ITEM_STATUSES)
+                ->orWhere(function (Builder $query): void {
+                    $query->where(function (Builder $workQuery): void {
+                        $workQuery->where(function (Builder $nonStockQuery): void {
+                            $nonStockQuery->where('source', '!=', 'Stock')
+                                ->where('status', 'Produksi');
+                        })->orWhere(function (Builder $stockQuery): void {
+                            $stockQuery->where('source', 'Stock')
+                                ->where('quality_damaged_quantity', '>', 0)
+                                ->whereIn('status', ['Distribusi', 'Produksi']);
+                        });
+                    })->where(function (Builder $drawingQuery): void {
+                        $drawingQuery->whereNull('factory_drawing_image')
+                            ->orWhere('factory_drawing_image', '');
+                    });
+                });
         });
     }
 

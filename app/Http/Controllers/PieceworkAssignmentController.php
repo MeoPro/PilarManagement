@@ -77,6 +77,7 @@ class PieceworkAssignmentController extends Controller
         DB::transaction(function () use ($orderItem, $employee, $validated, $user): void {
             $lockedItem = OrderItem::query()
                 ->whereKey($orderItem->id)
+                ->withSum(['services as pending_service_quantity' => fn ($query) => $query->where('status', 'Service')], 'quantity')
                 ->lockForUpdate()
                 ->firstOrFail();
             $lockedItem->load('order');
@@ -96,6 +97,17 @@ class PieceworkAssignmentController extends Controller
             if ($lockedItem->factory_status !== 'Produksi' || blank($lockedItem->factory_drawing_image)) {
                 throw ValidationException::withMessages([
                     'target_quantity' => 'Produk hanya dapat ditugaskan setelah berstatus Produksi dan memiliki gambar kerja Pilar Factory.',
+                ]);
+            }
+
+            if (
+                $lockedItem->source === 'Stock'
+                && ((int) $lockedItem->quality_unchecked_quantity > 0
+                    || (int) $lockedItem->service_quantity > 0
+                    || (int) $lockedItem->packed_quantity > 0)
+            ) {
+                throw ValidationException::withMessages([
+                    'target_quantity' => 'Selesaikan pemeriksaan PB untuk seluruh Stock sebelum menugaskan produk ke borongan PF.',
                 ]);
             }
 

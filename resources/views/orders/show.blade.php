@@ -20,6 +20,13 @@
             <span class="status-badge">{{ $order->is_urgent ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</span>
         </div>
 
+        <label for="order-product-status-filter">Filter produk</label>
+        <select id="order-product-status-filter" data-order-product-status-filter>
+            <option value="">Semua produk ({{ $order->items->count() }})</option>
+            @foreach($productStatusCounts as $productStatus => $quantity)
+                <option value="{{ $productStatus }}">{{ $productStatus }} ({{ $quantity }} unit)</option>
+            @endforeach
+        </select>
 
         <div class="table-wrapper">
             <table>
@@ -41,7 +48,15 @@
                 </thead>
                 <tbody>
                     @foreach($order->items as $item)
-                        <tr>
+                        @php($completedQuantity = $item->completed_quantity)
+                        @php($productionQuantity = $item->production_quantity)
+                        @php($serviceQuantity = $item->service_quantity)
+                        <tr
+                            data-order-product-row
+                            data-status-selesai="{{ $completedQuantity > 0 ? '1' : '0' }}"
+                            data-status-produksi="{{ $productionQuantity > 0 ? '1' : '0' }}"
+                            data-status-service="{{ $serviceQuantity > 0 ? '1' : '0' }}"
+                        >
                             <td>
                                 {{ $item->product }}
                                 @if($item->sku)
@@ -67,18 +82,33 @@
                             <td>{{ $item->source }}</td>
                             <td>
                                 @if($factoryWorkflow)
-                                    <strong>{{ $item->factory_status }}</strong>
+                                    <strong>{{ $item->factory_status === 'None' || ($item->status === 'Produksi' && $item->source !== 'Stock' && blank($item->factory_drawing_image)) ? 'New' : ($item->factory_status === 'Ready' ? 'Selesai' : $item->factory_status) }}</strong>
                                     <small>Produksi {{ $item->qty_completed }}/{{ $item->factory_quantity }}</small>
                                     @if((int) $item->quality_damaged_quantity > 0)
                                         <span class="stagnant-product-warning" role="alert">
-                                            Rusak menunggu finishing ulang: {{ $item->quality_damaged_quantity }} unit.
+                                            {{ $item->source === 'Stock' ? 'Stock rusak menunggu produksi ulang' : 'Rusak menunggu finishing ulang' }}: {{ $item->quality_damaged_quantity }} unit.
                                         </span>
                                     @endif
                                     @if((int) $item->packed_quantity > 0)
                                         <small>Dalam perjalanan {{ $item->packed_quantity }} unit</small>
                                     @endif
                                 @else
-                                    {{ $item->status }}
+                                    {{ $item->status === 'Ready' ? 'Selesai' : $item->status }}
+                                @endif
+                                <small>{{ $completedQuantity }} Selesai · {{ $productionQuantity }} Produksi · {{ $serviceQuantity }} Service</small>
+                                @if($item->services->isNotEmpty())
+                                    <details>
+                                        <summary>Riwayat Service</summary>
+                                        @foreach($item->services as $service)
+                                            <small>
+                                                {{ $service->status === 'Ready' ? 'Selesai' : $service->status }}:
+                                                {{ $service->quantity }} unit · {{ $service->severity }}
+                                                @if($service->note)
+                                                    · {{ $service->note }}
+                                                @endif
+                                            </small>
+                                        @endforeach
+                                    </details>
                                 @endif
                             </td>
                             <td>
@@ -105,7 +135,8 @@
                                     @endif
                                 </div>
                                 @if($canAssignPiecework
-                                    && $item->factory_status === 'Produksi'
+                                    && in_array($item->status, ['Distribusi', 'Produksi'], true)
+                                    && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0)
                                     && blank($item->factory_drawing_image)
                                     && $order->status !== 'Cancel')
                                     <form
@@ -116,7 +147,7 @@
                                     >
                                         @csrf
                                         @method('PATCH')
-                                        <label for="factory-drawing-{{ $item->id }}">Unggah gambar kedua: gambar kerja PF</label>
+                                        <label for="factory-drawing-{{ $item->id }}">Unggah gambar kerja tukang PF</label>
                                         <input
                                             id="factory-drawing-{{ $item->id }}"
                                             type="file"
@@ -130,6 +161,9 @@
                             </td>
                         </tr>
                     @endforeach
+                    <tr data-order-product-filter-empty hidden>
+                        <td colspan="10">Tidak ada produk pada status ini.</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -139,13 +173,19 @@
                 <h2>Rincian Pekerjaan Factory</h2>
                 @if($canAssignPiecework)
                     @foreach($order->items as $item)
+                        @php($stockFactoryReady = $item->source !== 'Stock'
+                            || ((int) $item->quality_unchecked_quantity === 0
+                                && (int) $item->service_quantity === 0
+                                && (int) $item->packed_quantity === 0))
                         @php($reservedPieceworkQuantity = $item->pieceworkAssignments->whereNull('completed_at')->whereNull('cancelled_at')->sum(fn ($assignment) => max($assignment->target_quantity - $assignment->completed_quantity - $assignment->cancelled_quantity - (int) $assignment->produced_quantity, 0)))
                         @php($assignablePieceworkQuantity = max($item->factory_qty_remaining - $reservedPieceworkQuantity, 0))
                         @if($item->activeSubcontractorAssignments->isNotEmpty())
                             <p class="muted">Produk ini sudah dialokasikan ke Subcon dan tidak dapat ditugaskan ke borongan PF.</p>
+                        @elseif($item->source === 'Stock' && ! $stockFactoryReady)
+                            <p class="muted">Selesaikan pemeriksaan PB dan Service untuk seluruh Stock sebelum penugasan PF.</p>
                         @elseif($item->factory_status !== 'Produksi' || blank($item->factory_drawing_image))
                             <p class="muted">Penugasan borongan tersedia setelah produk berstatus Produksi dan gambar kerja PF diunggah.</p>
-                        @elseif($assignablePieceworkQuantity > 0)
+                        @elseif($stockFactoryReady && $assignablePieceworkQuantity > 0)
                             <form action="{{ route('order-items.piecework-assignments.store', $item) }}" method="POST" class="production-status-form piecework-assignment-form">
                                 @csrf
                                 <h3>Tambah penugasan: {{ $item->product }}</h3>
@@ -379,6 +419,30 @@
             <p><strong>Status:</strong> {{ $order->is_urgent ? 'URGENT' : ($order->status === 'None' ? 'New' : $order->status) }}</p>
             <p><strong>Terakhir diubah:</strong> {{ $order->last_edit?->format('d M Y H:i') ?? '-' }} WITA</p>
 
+            @if($order->pending_deadline)
+                <section class="order-deadline-request" aria-labelledby="pending-deadline-heading">
+                    <h3 id="pending-deadline-heading">Pengajuan Percepatan Deadline</h3>
+                    <p><strong>Deadline diajukan:</strong> {{ $order->pending_deadline->format('d M Y') }}</p>
+                    <p><strong>Diajukan oleh:</strong> {{ $order->pendingDeadlineRequestedBy?->name ?? 'Admin PB' }}</p>
+                    <p><strong>Alasan:</strong> {{ $order->pending_deadline_reason ?? '-' }}</p>
+
+                    @if($canReviewDeadlineChange)
+                        <form action="{{ route('orders.deadline-change.approve', $order) }}" method="POST" class="production-status-form">
+                            @csrf
+                            @method('PATCH')
+                            <button class="btn btn-success" type="submit">Setujui deadline</button>
+                        </form>
+                        <form action="{{ route('orders.deadline-change.reject', $order) }}" method="POST" class="production-status-form">
+                            @csrf
+                            @method('PATCH')
+                            <label for="deadline-decision-note">Catatan penolakan (opsional)</label>
+                            <textarea id="deadline-decision-note" name="decision_note" maxlength="1000" rows="2"></textarea>
+                            <button class="btn btn-danger" type="submit">Tolak pengajuan</button>
+                        </form>
+                    @endif
+                </section>
+            @endif
+
             @if($canAssignSubcontractors && $order->status !== 'Cancel')
                 <form action="{{ route('orders.subcontractor-assignments.store', $order) }}" method="POST" class="production-status-form">
                     @csrf
@@ -475,4 +539,5 @@
     @if($factoryWorkflow)
         @include('admin.attendance.partials.piecework-action-dialog')
     @endif
+
 @endsection

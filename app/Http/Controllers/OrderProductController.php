@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Employee;
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\OrderItemService;
 use App\Models\Subcontractor;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -25,10 +26,11 @@ class OrderProductController extends Controller
     {
         $user = $request->user();
         $statuses = $this->queueStatusesFor($user);
-        $productStatuses = $this->editableStatusesFor($user);
         $factoryUser = $user->isFactoryWorkflow();
-        $canAssignSubcontractors = $user->isOwner()
-            || ($factoryUser && $user->canAccessMenu('subcontractors'));
+        $statusOptions = $factoryUser ? $statuses : [...$statuses, 'Produksi'];
+        $productStatuses = $this->editableStatusesFor($user);
+        $canAssignSubcontractors = $factoryUser
+            && ($user->isOwner() || $user->canAccessMenu('subcontractors'));
 
         abort_if($statuses === [], 403);
 
@@ -36,13 +38,17 @@ class OrderProductController extends Controller
         $statusFilter = (string) $request->query('status', '');
         $stagnantCutoff = now()->subDays(7);
 
-        if (! in_array($statusFilter, $statuses, true)) {
+        if (! in_array($statusFilter, $statuses, true)
+            && ! (! $factoryUser && $statusFilter === 'Produksi')) {
             $statusFilter = '';
         }
 
         $itemsQuery = OrderItem::query()
             ->with([
                 'category:id,name',
+                'services' => fn ($query) => $query
+                    ->where('status', 'Service')
+                    ->orderBy('id'),
                 'activeSubcontractorAssignments.subcontractor:id,name,is_active',
                 'pieceworkAssignments' => fn ($query) => $query
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
@@ -51,16 +57,39 @@ class OrderProductController extends Controller
             ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
             ->when(
                 $factoryUser,
-                fn (Builder $query) => $query
-                    ->whereIn('factory_status', $statuses)
-                    ->whereNotNull('factory_drawing_image')
-                    ->where('factory_drawing_image', '!=', '')
+                fn (Builder $query) => $query->where(function (Builder $query) use ($statuses): void {
+                    $query->where(function (Builder $activeQuery) use ($statuses): void {
+                        $activeQuery->whereIn('factory_status', array_diff($statuses, ['None']))
+                            ->whereNotNull('factory_drawing_image')
+                            ->where('factory_drawing_image', '!=', '');
+                    })->orWhere(function (Builder $pendingQuery): void {
+                        $this->applyFactoryDrawingPendingFilter($pendingQuery);
+                    });
+                })
                     ->whereRaw(
                         'order_items.qty > COALESCE((SELECT SUM(subcontractor_assignments.assigned_quantity) FROM subcontractor_assignments WHERE subcontractor_assignments.order_item_id = order_items.id AND subcontractor_assignments.cancelled_at IS NULL), 0)',
                     ),
-                fn (Builder $query) => $query->whereIn('status', $statuses),
+                fn (Builder $query) => $query->where(function (Builder $queueQuery) use ($statuses): void {
+                    $queueQuery->whereIn('status', $statuses)
+                        ->orWhereHas('services', fn (Builder $serviceQuery) => $serviceQuery->where('status', 'Service'))
+                        ->orWhere(fn (Builder $stockQuery) => $this->applyStockPendingQualityFilter($stockQuery));
+                }),
             )
-            ->when($statusFilter !== '', fn (Builder $query) => $query->where($factoryUser ? 'factory_status' : 'status', $statusFilter))
+            ->when($statusFilter !== '', function (Builder $query) use ($factoryUser, $statusFilter): void {
+                if ($factoryUser && $statusFilter === 'None') {
+                    $this->applyFactoryDrawingPendingFilter($query);
+
+                    return;
+                }
+
+                if (! $factoryUser && $statusFilter === 'Produksi') {
+                    $this->applyStockPendingQualityFilter($query);
+
+                    return;
+                }
+
+                $query->where($factoryUser ? 'factory_status' : 'status', $statusFilter);
+            })
             ->when($search !== '', fn (Builder $query) => $query->where(function (Builder $query) use ($search): void {
                 $query->where('product', 'like', "%{$search}%")
                     ->orWhereHas('order', fn (Builder $orderQuery) => $orderQuery->where('order_id', 'like', "%{$search}%"));
@@ -73,6 +102,7 @@ class OrderProductController extends Controller
             $stagnantItemId = (clone $itemsQuery)
                 ->whereRaw($incompleteFactoryWorkSql)
                 ->where('factory_status', '!=', 'Distribusi')
+                ->where('factory_status', '!=', 'None')
                 ->where('qty_progress_updated_at', '<=', $stagnantCutoff)
                 ->orderBy('qty_progress_updated_at')
                 ->orderBy('id')
@@ -83,7 +113,7 @@ class OrderProductController extends Controller
             ->when(
                 $factoryUser,
                 fn (Builder $query) => $query->orderByRaw(
-                    "CASE WHEN {$incompleteFactoryWorkSql} AND factory_status != 'Distribusi' AND qty_progress_updated_at <= ? THEN 0 ELSE 1 END",
+                    "CASE WHEN {$incompleteFactoryWorkSql} AND factory_status NOT IN ('Distribusi', 'None') AND qty_progress_updated_at <= ? THEN 0 ELSE 1 END",
                     [$stagnantCutoff],
                 ),
                 fn (Builder $query) => $query->orderByRaw(
@@ -113,6 +143,7 @@ class OrderProductController extends Controller
             'search',
             'statusFilter',
             'statuses',
+            'statusOptions',
             'productStatuses',
             'factoryUser',
             'canAssignSubcontractors',
@@ -126,6 +157,7 @@ class OrderProductController extends Controller
     {
         $user = $request->user();
         abort_if($user->isFactoryWorkflow(), 403);
+        abort_if($orderItem->source === 'Stock', 403);
         $queueStatuses = $this->queueStatusesFor($user);
         $factoryWorkflow = $user->isFactoryWorkflow();
         $queuedStatus = $factoryWorkflow ? $orderItem->factory_status : $orderItem->status;
@@ -350,15 +382,30 @@ class OrderProductController extends Controller
             $order = Order::query()->lockForUpdate()->findOrFail($orderItem->order_id);
             $item = OrderItem::query()->lockForUpdate()->findOrFail($orderItem->id);
 
-            if ($order->status === 'Cancel' || $item->factory_status !== 'Produksi') {
+            $isWaitingForFactoryDrawing = $item->source === 'Stock'
+                ? (int) $item->quality_damaged_quantity > 0
+                    && in_array($item->status, ['Distribusi', 'Produksi'], true)
+                    && blank($item->factory_drawing_image)
+                : $item->status === 'Produksi' && blank($item->factory_drawing_image);
+
+            $isExistingFactoryProduction = $item->factory_status === 'Produksi'
+                && ($item->status === 'Produksi'
+                    || ($item->source === 'Stock'
+                        && (int) $item->quality_damaged_quantity > 0
+                        && in_array($item->status, ['Distribusi', 'Produksi'], true)));
+
+            if ($order->status === 'Cancel' || (! $isWaitingForFactoryDrawing && ! $isExistingFactoryProduction)) {
                 throw ValidationException::withMessages([
-                    'factory_drawing_image' => 'Gambar kerja hanya dapat diunggah untuk produk berstatus Produksi pada order aktif.',
+                    'factory_drawing_image' => 'Gambar kerja hanya dapat diunggah setelah produk masuk antrean Produksi PF, termasuk Stock rusak.',
                 ]);
             }
 
             $previousPath = $item->factory_drawing_image;
             $newPath = $validated['factory_drawing_image']->store('orders/factory-drawings', 'public');
-            $item->update(['factory_drawing_image' => $newPath]);
+            $item->update([
+                'factory_drawing_image' => $newPath,
+                'factory_status' => $isWaitingForFactoryDrawing ? 'Produksi' : $item->factory_status,
+            ]);
             $order->events()->create([
                 'order_item_id' => $item->id,
                 'type' => 'factory_drawing_uploaded',
@@ -379,11 +426,14 @@ class OrderProductController extends Controller
     public function recordQuality(Request $request, OrderItem $orderItem): RedirectResponse
     {
         $user = $request->user();
-        abort_unless($user->canAccessMenu('order_products') && $user->canAccessUnit(User::UNIT_BALI), 403);
-        abort_unless(! $user->isOwner() || $user->activeBusinessUnit() === User::UNIT_BALI, 404);
+        $this->authorizeStockQualityManagement($user);
+        $severityRules = $orderItem->source === 'Stock'
+            ? ['nullable', 'required_if:result,Rusak', Rule::in(['Ringan', 'Parah'])]
+            : ['nullable', Rule::in(['Ringan', 'Parah'])];
         $validated = $request->validate([
             'result' => ['required', Rule::in(['Bagus', 'Rusak', 'Kurang'])],
             'quantity' => ['required', 'integer', 'min:1'],
+            'severity' => $severityRules,
             'note' => ['nullable', 'string', 'max:1000'],
         ]);
 
@@ -392,21 +442,31 @@ class OrderProductController extends Controller
             $item = OrderItem::query()->lockForUpdate()->findOrFail($orderItem->id);
             $quantity = (int) $validated['quantity'];
             $result = $validated['result'];
+            $isStockAtDistribution = $item->source === 'Stock'
+                && in_array($item->status, ['Distribusi', 'Produksi'], true)
+                && $item->quality_unchecked_quantity > 0;
+            $isStockInTransit = $item->source === 'Stock' && $item->status === 'Dalam Perjalanan';
+            $isStockReadinessCheck = $isStockAtDistribution || $isStockInTransit;
+            $availableQuantity = $isStockAtDistribution
+                ? $item->quality_unchecked_quantity
+                : (int) $item->packed_quantity;
 
-            if ($order->status === 'Cancel' || $item->status !== 'Dalam Perjalanan') {
+            if ($order->status === 'Cancel' || ($item->status !== 'Dalam Perjalanan' && ! $isStockAtDistribution)) {
                 throw ValidationException::withMessages([
-                    'result' => 'Pemeriksaan kualitas hanya tersedia untuk produk yang sedang dalam perjalanan.',
+                    'result' => 'Pemeriksaan kualitas hanya tersedia untuk produk Stock di PB atau produk yang sedang dalam perjalanan.',
                 ]);
             }
 
-            if (in_array($result, ['Bagus', 'Rusak'], true) && $quantity > (int) $item->packed_quantity) {
+            if (in_array($result, ['Bagus', 'Rusak'], true) && $quantity > $availableQuantity) {
                 throw ValidationException::withMessages([
-                    'quantity' => 'Jumlah yang diperiksa melebihi produk yang sudah masuk ke Packing.',
+                    'quantity' => 'Jumlah yang diperiksa melebihi produk yang tersedia untuk pemeriksaan.',
                 ]);
             }
 
             if ($result === 'Kurang') {
-                $missingQuantity = $item->quality_shortage_available;
+                $missingQuantity = $isStockAtDistribution
+                    ? $item->quality_unchecked_quantity
+                    : ($isStockReadinessCheck ? (int) $item->packed_quantity : $item->quality_shortage_available);
 
                 if ($quantity > $missingQuantity) {
                     throw ValidationException::withMessages([
@@ -416,30 +476,187 @@ class OrderProductController extends Controller
             }
 
             if ($result === 'Bagus') {
-                $item->packed_quantity = (int) $item->packed_quantity - $quantity;
+                if (! $isStockAtDistribution) {
+                    $item->packed_quantity = (int) $item->packed_quantity - $quantity;
+                }
                 $item->quality_good_quantity = (int) $item->quality_good_quantity + $quantity;
+                if ($isStockReadinessCheck && ! $isStockAtDistribution) {
+                    $item->quality_damaged_quantity = max(0, (int) $item->quality_damaged_quantity - $quantity);
+                }
             } elseif ($result === 'Rusak') {
-                $item->packed_quantity = (int) $item->packed_quantity - $quantity;
-                $item->quality_damaged_quantity = (int) $item->quality_damaged_quantity + $quantity;
+                if (! $isStockAtDistribution) {
+                    $item->packed_quantity = (int) $item->packed_quantity - $quantity;
+                }
+                if ($isStockReadinessCheck) {
+                    $isSevere = $validated['severity'] === 'Parah';
+                    $item->services()->create([
+                        'quantity' => $quantity,
+                        'status' => $isSevere ? 'Produksi' : 'Service',
+                        'severity' => $validated['severity'],
+                        'note' => $validated['note'] ?? null,
+                    ]);
+                    if ($isSevere) {
+                        $item->quality_damaged_quantity += $quantity;
+                        $item->status = 'Produksi';
+                        $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                    }
+                } else {
+                    $item->quality_damaged_quantity += $quantity;
+                }
             } else {
-                $item->packed_quantity = max(0, (int) $item->packed_quantity - $quantity);
+                if (! $isStockAtDistribution) {
+                    $item->packed_quantity = max(0, (int) $item->packed_quantity - $quantity);
+                }
                 $item->quality_short_quantity = (int) $item->quality_short_quantity + $quantity;
+                if ($isStockReadinessCheck && ! $isStockAtDistribution) {
+                    $item->quality_damaged_quantity = max(0, (int) $item->quality_damaged_quantity - $quantity);
+                }
             }
 
-            $item->save();
-            $item->synchronizeWorkflowStatuses();
+            if ($isStockReadinessCheck) {
+                $hasUnitsAwaitingQuality = $isStockAtDistribution
+                    ? $item->quality_unchecked_quantity > 0
+                    : (int) $item->packed_quantity > 0;
+
+                if ($hasUnitsAwaitingQuality) {
+                    if ((int) $item->quality_damaged_quantity > 0) {
+                        $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                    }
+
+                    $item->save();
+                } elseif ((int) $item->quality_damaged_quantity > 0) {
+                    $item->update([
+                        'status' => 'Produksi',
+                        'factory_status' => filled($item->factory_drawing_image) ? 'Produksi' : 'None',
+                    ]);
+                } elseif (
+                    (int) $item->quality_good_quantity + (int) $item->quality_short_quantity >= (int) $item->qty
+                    && (int) $item->quality_damaged_quantity === 0
+                    && (int) $item->packed_quantity === 0
+                    && (int) $item->service_quantity === 0
+                ) {
+                    $item->update([
+                        'status' => 'Ready',
+                        'factory_status' => 'Ready',
+                    ]);
+                } else {
+                    if ((int) $item->service_quantity > 0 && (int) $item->packed_quantity === 0) {
+                        $item->status = 'Distribusi';
+                    }
+
+                    $item->save();
+                }
+            } else {
+                $item->save();
+                $item->synchronizeWorkflowStatuses();
+            }
+
             $order->synchronizeProductionStatusFromItems();
             $order->events()->create([
                 'order_item_id' => $item->id,
                 'type' => 'item_quality_checked',
                 'title' => 'Hasil pemeriksaan kualitas dicatat',
                 'description' => "{$order->order_id} - {$item->product}: {$quantity} {$result}"
+                    .(filled($validated['severity'] ?? null) ? " ({$validated['severity']})" : '')
                     .(filled($validated['note'] ?? null) ? ' · '.$validated['note'] : ''),
                 'occurred_at' => now(),
             ]);
         });
 
         return back()->with('success', 'Hasil pemeriksaan kualitas berhasil dicatat.');
+    }
+
+    public function recordServiceResult(Request $request, OrderItemService $orderItemService): RedirectResponse
+    {
+        $user = $request->user();
+        $this->authorizeStockQualityManagement($user);
+        $validated = $request->validate([
+            'result' => ['required', Rule::in(['Bagus', 'Rusak'])],
+            'quantity' => ['required', 'integer', 'min:1'],
+            'note' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        DB::transaction(function () use ($orderItemService, $validated): void {
+            $orderItemId = (int) $orderItemService->order_item_id;
+            $orderId = OrderItem::query()->whereKey($orderItemId)->value('order_id');
+            $order = Order::query()->lockForUpdate()->findOrFail($orderId);
+            $item = OrderItem::query()->lockForUpdate()->findOrFail($orderItemId);
+            $service = OrderItemService::query()
+                ->where('order_item_id', $item->id)
+                ->lockForUpdate()
+                ->findOrFail($orderItemService->id);
+            $quantity = (int) $validated['quantity'];
+
+            if ($order->status === 'Cancel' || $item->source !== 'Stock' || $service->status !== 'Service') {
+                throw ValidationException::withMessages([
+                    'result' => 'Hasil Service hanya dapat dicatat untuk produk Stock yang masih berstatus Service.',
+                ]);
+            }
+
+            if ($quantity > (int) $service->quantity) {
+                throw ValidationException::withMessages([
+                    'quantity' => 'Jumlah yang diproses melebihi produk yang tersedia di Service.',
+                ]);
+            }
+
+            $remainingQuantity = (int) $service->quantity - $quantity;
+            $serviceSeverity = $service->severity;
+            $resultingStatus = $validated['result'] === 'Bagus' ? 'Ready' : 'Produksi';
+            $service->update([
+                'quantity' => $quantity,
+                'status' => $resultingStatus,
+                'severity' => $validated['result'] === 'Rusak' ? 'Parah' : $serviceSeverity,
+            ]);
+
+            if ($remainingQuantity > 0) {
+                $item->services()->create([
+                    'quantity' => $remainingQuantity,
+                    'status' => 'Service',
+                    'severity' => $serviceSeverity,
+                    'note' => $service->note,
+                ]);
+            }
+
+            if ($validated['result'] === 'Bagus') {
+                $item->quality_good_quantity += $quantity;
+            } else {
+                $item->quality_damaged_quantity += $quantity;
+                $item->status = 'Produksi';
+                $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+            }
+
+            if ($validated['result'] === 'Bagus') {
+                if ((int) $item->quality_damaged_quantity > 0) {
+                    $item->status = 'Produksi';
+                    $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                } elseif (
+                    $item->quality_unchecked_quantity === 0
+                    && (int) $item->quality_good_quantity + (int) $item->quality_short_quantity >= (int) $item->qty
+                    && (int) $item->packed_quantity === 0
+                    && (int) $item->service_quantity === 0
+                ) {
+                    $item->status = 'Ready';
+                    $item->factory_status = 'Ready';
+                } elseif ((int) $item->packed_quantity > 0) {
+                    $item->status = 'Dalam Perjalanan';
+                } elseif ($item->quality_unchecked_quantity === 0) {
+                    $item->status = 'Distribusi';
+                }
+            }
+
+            $item->save();
+            $order->synchronizeProductionStatusFromItems();
+            $order->events()->create([
+                'order_item_id' => $item->id,
+                'type' => 'item_service_result_recorded',
+                'title' => 'Hasil Service produk dicatat',
+                'description' => "{$order->order_id} - {$item->product}: {$quantity} {$validated['result']}"
+                    .(filled($validated['note'] ?? null) ? ' · '.$validated['note'] : ''),
+                'occurred_at' => now(),
+            ]);
+        });
+
+        return back()->with('success', 'Hasil Service berhasil dicatat.');
     }
 
     /**
@@ -480,6 +697,12 @@ class OrderProductController extends Controller
         }
     }
 
+    private function authorizeStockQualityManagement(User $user): void
+    {
+        abort_unless($user->canAccessMenu('order_products') && $user->canAccessUnit(User::UNIT_BALI), 403);
+        abort_unless(! $user->isOwner() || $user->activeBusinessUnit() === User::UNIT_BALI, 404);
+    }
+
     /**
      * @return list<string>
      */
@@ -487,7 +710,7 @@ class OrderProductController extends Controller
     {
         if ($user->isOwner()) {
             return $user->activeBusinessUnit() === User::UNIT_FACTORY
-                ? ['Produksi', 'Finishing', 'Packing']
+                ? ['None', 'Produksi', 'Finishing', 'Packing']
                 : ['Dalam Perjalanan', 'Distribusi'];
         }
 
@@ -498,7 +721,7 @@ class OrderProductController extends Controller
         }
 
         if ($user->canAccessUnit(User::UNIT_FACTORY)) {
-            $statuses = array_merge($statuses, ['Produksi', 'Finishing', 'Packing']);
+            $statuses = array_merge($statuses, ['None', 'Produksi', 'Finishing', 'Packing']);
         }
 
         return array_values(array_unique($statuses));
@@ -522,5 +745,34 @@ class OrderProductController extends Controller
         }
 
         return self::PRODUCT_STATUSES;
+    }
+
+    private function applyFactoryDrawingPendingFilter(Builder $query): Builder
+    {
+        return $query->where(function (Builder $workQuery): void {
+            $workQuery->where(function (Builder $nonStockQuery): void {
+                $nonStockQuery->where('source', '!=', 'Stock')
+                    ->where('status', 'Produksi');
+            })->orWhere(function (Builder $stockQuery): void {
+                $stockQuery->where('source', 'Stock')
+                    ->where('quality_damaged_quantity', '>', 0)
+                    ->whereIn('status', ['Distribusi', 'Produksi']);
+            });
+        })->where(function (Builder $drawingQuery): void {
+            $drawingQuery->whereNull('factory_drawing_image')
+                ->orWhere('factory_drawing_image', '');
+        });
+    }
+
+    private function applyStockPendingQualityFilter(Builder $query): Builder
+    {
+        return $query->where('source', 'Stock')
+            ->where('status', 'Produksi')
+            ->where('quality_damaged_quantity', '>', 0)
+            ->where(function (Builder $pendingQuery): void {
+                $pendingQuery->whereRaw(
+                    "order_items.qty > COALESCE(order_items.quality_good_quantity, 0) + COALESCE(order_items.quality_damaged_quantity, 0) + COALESCE(order_items.quality_short_quantity, 0) + COALESCE((SELECT SUM(order_item_services.quantity) FROM order_item_services WHERE order_item_services.order_item_id = order_items.id AND order_item_services.status = 'Service'), 0)",
+                )->orWhereHas('services', fn (Builder $serviceQuery) => $serviceQuery->where('status', 'Service'));
+            });
     }
 }

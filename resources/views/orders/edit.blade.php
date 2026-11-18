@@ -168,6 +168,7 @@
                     class="form-group order-form-deadline-control"
                     data-deadline-control
                     data-deadline-today="{{ today()->toDateString() }}"
+                    data-deadline-minimum-days="1"
                 >
                     <label for="deadline-date">Deadline tanggal</label>
                     <input
@@ -176,18 +177,40 @@
                         class="date-input"
                         name="deadline"
                         value="{{ old('deadline', $order->deadline?->format('Y-m-d')) }}"
+                        min="{{ today()->addDay()->toDateString() }}"
                         data-deadline-date
                     >
                     <label for="deadline-days">Atau dalam hari</label>
                     <input
                         id="deadline-days"
                         type="number"
-                        min="0"
+                        min="1"
                         step="1"
                         data-deadline-days
                         aria-label="Jumlah hari sampai deadline"
                     >
                     <small>Ubah jumlah hari atau tanggal; nilai lainnya akan menyesuaikan.</small>
+                    <label for="deadline-change-reason">Alasan percepatan deadline</label>
+                    <textarea
+                        id="deadline-change-reason"
+                        name="deadline_change_reason"
+                        maxlength="1000"
+                        rows="2"
+                        aria-describedby="deadline-change-reason-help"
+                    >{{ old('deadline_change_reason') }}</textarea>
+                    <small id="deadline-change-reason-help">
+                        @if($hasProductionWorkItems)
+                            Wajib diisi jika deadline dipercepat saat ada produk berstatus Produksi.
+                        @else
+                            Wajib diisi jika percepatan deadline memerlukan persetujuan PF.
+                        @endif
+                    </small>
+                    @if($order->pending_deadline)
+                        <small>
+                            Pengajuan sebelumnya: {{ $order->pending_deadline->format('d M Y') }}.
+                            Pengajuan baru akan memperbarui pengajuan tersebut.
+                        </small>
+                    @endif
 
                 </div>
 

@@ -22,7 +22,7 @@ class DashboardController extends Controller
 
         if ($factoryDashboard && $user->canAccessMenu('orders')) {
             $factoryStats['active_orders'] = Order::query()
-                ->whereIn('status', ['Proses Produksi', 'Finishing'])
+                ->whereIn('status', ['Proses Produksi', 'Finishing', 'Packing', 'Distribusi'])
                 ->count();
         }
 
@@ -35,8 +35,8 @@ class DashboardController extends Controller
 
         if (! $factoryDashboard && $user->canAccessMenu('orders')) {
             $orderStats = Order::query()->selectRaw(
-                'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
-                ['None', 'None', 'Proses Produksi', 'Finishing', 'Selesai'],
+                'COUNT(*) AS total_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
+                ['None', 'None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai'],
             )->first();
 
             if ($user->isSalesWorkflow()) {

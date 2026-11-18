@@ -42,7 +42,7 @@ function createWorkflowOrder(string $orderId, array $itemAttributes = []): array
     return [$order, $item];
 }
 
-test('order enters production after every product has a mockup while PF queue requires a work drawing', function () {
+test('PF work stays new until every production item has a work drawing', function () {
     Storage::fake('public');
     $salesAdmin = User::factory()->admin()->create([
         'accessible_menus' => ['orders', 'order_products', 'attendance'],
@@ -72,7 +72,7 @@ test('order enters production after every product has a mockup while PF queue re
         ->assertRedirect();
 
     expect($item->fresh()->status)->toBe('Produksi')
-        ->and($item->fresh()->factory_status)->toBe('Produksi')
+        ->and($item->fresh()->factory_status)->toBe('None')
         ->and($order->fresh()->status)->toBe('None');
 
     $factoryAdmin = User::factory()->factoryAdmin()->create([
@@ -85,7 +85,9 @@ test('order enters production after every product has a mockup while PF queue re
 
     $this->actingAs($factoryAdmin)
         ->get(route('order-products.index'))
-        ->assertDontSeeText($item->product)
+        ->assertSeeText($item->product)
+        ->assertSeeText('New')
+        ->assertSeeText('Unggah gambar kerja tukang')
         ->assertDontSeeText($pendingItem->product);
     $this->get(route('orders.index'))
         ->assertSeeText($order->order_id)
@@ -95,7 +97,7 @@ test('order enters production after every product has a mockup while PF queue re
     $this->get(route('orders.show', $order))
         ->assertDontSee('Perbarui status order')
         ->assertDontSee('Simpan Status')
-        ->assertSeeText('Unggah gambar kedua: gambar kerja PF')
+        ->assertSeeText('Unggah gambar kerja tukang PF')
         ->assertDontSeeText($pendingItem->product);
 
     $this->actingAs($factoryAdmin)
@@ -106,17 +108,14 @@ test('order enters production after every product has a mockup while PF queue re
         ])
         ->assertSessionHasErrors('target_quantity');
 
-    Storage::disk('public')->put('orders/factory-drawings/old.png', 'old');
-    $item->update(['factory_drawing_image' => 'orders/factory-drawings/old.png']);
+    $this->from(route('order-products.index'))
+        ->patch(route('order-products.factory-drawing.update', $item), [
+            'factory_drawing_image' => workflowImage('drawing-one.png'),
+        ])->assertRedirect(route('order-products.index'));
 
-    $this->patch(route('order-products.factory-drawing.update', $item), [
-        'factory_drawing_image' => workflowImage('drawing-one.png'),
-    ])->assertRedirect();
-
-    $firstDrawing = $item->fresh()->factory_drawing_image;
     expect($order->fresh()->status)->toBe('None');
-    Storage::disk('public')->assertExists($firstDrawing);
-    Storage::disk('public')->assertMissing('orders/factory-drawings/old.png');
+    Storage::disk('public')->assertExists($item->fresh()->factory_drawing_image);
+    expect($item->fresh()->factory_status)->toBe('Produksi');
     $this->get(route('order-products.index'))
         ->assertSeeText($item->product);
 
@@ -131,17 +130,49 @@ test('order enters production after every product has a mockup while PF queue re
         ])
         ->assertRedirect(route('orders.edit', $order));
 
-    expect($order->fresh()->status)->toBe('Proses Produksi');
+    expect($order->fresh()->status)->toBe('Proses Produksi')
+        ->and($pendingItem->fresh()->factory_status)->toBe('None');
 
     $this->actingAs($factoryAdmin)
-        ->patch(route('order-products.factory-drawing.update', $item), [
+        ->get(route('order-products.index'))
+        ->assertSeeText($pendingItem->product)
+        ->assertSeeText('Unggah gambar kerja tukang');
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('order-products.index'))
+        ->patch(route('order-products.factory-drawing.update', $pendingItem), [
             'factory_drawing_image' => workflowImage('drawing-two.png'),
         ])
-        ->assertRedirect();
+        ->assertRedirect(route('order-products.index'));
 
-    expect($item->fresh()->factory_drawing_image)->not->toBe($firstDrawing);
-    Storage::disk('public')->assertMissing($firstDrawing);
-    Storage::disk('public')->assertExists($item->fresh()->factory_drawing_image);
+    expect($pendingItem->fresh()->factory_drawing_image)->not->toBeNull()
+        ->and($pendingItem->fresh()->factory_status)->toBe('Produksi')
+        ->and($order->fresh()->status)->toBe('Proses Produksi');
+    Storage::disk('public')->assertExists($pendingItem->fresh()->factory_drawing_image);
+});
+
+test('PF cannot upload a work drawing before PB starts production', function () {
+    Storage::fake('public');
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['order_products'],
+    ]);
+    [$order, $item] = createWorkflowOrder('WORKFLOW-DRAWING-TOO-EARLY', [
+        'status' => 'None',
+        'factory_status' => 'None',
+    ]);
+    $order->update(['status' => 'None']);
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('order-products.index'))
+        ->patch(route('order-products.factory-drawing.update', $item), [
+            'factory_drawing_image' => workflowImage('too-early.png'),
+        ])
+        ->assertSessionHasErrors('factory_drawing_image');
+
+    expect($item->fresh()->factory_drawing_image)->toBeNull()
+        ->and($item->fresh()->factory_status)->toBe('None')
+        ->and($order->fresh()->status)->toBe('None');
+    $this->assertDatabaseCount('order_events', 0);
 });
 
 test('Factory finishing moves partial quantities to packing and quality checks finish the order', function () {

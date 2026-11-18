@@ -48,6 +48,57 @@ textarea {
     min-height: 100vh;
 }
 
+.navigation-progress {
+    position: fixed;
+    z-index: 10000;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.navigation-progress[hidden] {
+    display: none;
+}
+
+.navigation-progress span {
+    display: block;
+    width: 32%;
+    height: 100%;
+    border-radius: 0 999px 999px 0;
+    background: #4f46e5;
+    box-shadow: 0 0 8px rgb(79 70 229 / 45%);
+    transform: translateX(-110%);
+}
+
+body.is-navigating .navigation-progress span {
+    animation: navigation-progress 1.1s ease-in-out infinite;
+}
+
+@keyframes navigation-progress {
+    0% {
+        transform: translateX(-110%);
+    }
+
+    70% {
+        transform: translateX(310%);
+    }
+
+    100% {
+        transform: translateX(310%);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.is-navigating .navigation-progress span {
+        width: 100%;
+        animation: none;
+        transform: none;
+    }
+}
+
 .app-sidebar {
     position: fixed;
     z-index: 20;
@@ -1434,6 +1485,12 @@ textarea {
     max-width: 100%;
 }
 
+.page-container .stock-quality-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .page-container .spending {
     color: #111827;
     font-size: 18px;
@@ -1610,6 +1667,56 @@ textarea {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    margin-top: 6px;
+}
+
+.page-container .stock-quality-dialog {
+    width: min(100% - 32px, 460px);
+    max-width: 460px;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    background: #fff;
+    padding: 22px;
+    color: #111827;
+    box-shadow: 0 20px 50px rgb(17 24 39 / 18%);
+}
+
+.page-container .stock-quality-dialog::backdrop {
+    background: rgb(17 24 39 / 45%);
+}
+
+.stock-quality-form {
+    display: grid;
+    gap: 12px;
+}
+
+.stock-quality-form h2,
+.stock-quality-form p {
+    margin: 0;
+}
+
+.stock-quality-form label {
+    display: grid;
+    gap: 6px;
+    color: #374151;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.stock-quality-quantity-control,
+.stock-quality-dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stock-quality-quantity-control input {
+    flex: 1;
+    min-width: 0;
+}
+
+.stock-quality-dialog-actions {
+    justify-content: flex-end;
     margin-top: 6px;
 }
 
@@ -2540,6 +2647,36 @@ textarea {
     background: #3b82f6;
 }
 
+.order-status-tab.is-distribution .order-status-dot,
+.order-status-pill.is-distribution {
+    background: #f0fdfa;
+    color: #0f766e;
+}
+
+.order-status-tab.is-distribution .order-status-dot {
+    background: #14b8a6;
+}
+
+.order-status-tab.is-packing .order-status-dot,
+.order-status-pill.is-packing {
+    background: #fefce8;
+    color: #a16207;
+}
+
+.order-status-tab.is-packing .order-status-dot {
+    background: #eab308;
+}
+
+.order-status-tab.is-service .order-status-dot,
+.order-status-pill.is-service {
+    background: #fdf2f8;
+    color: #be185d;
+}
+
+.order-status-tab.is-service .order-status-dot {
+    background: #ec4899;
+}
+
 .order-status-tab.is-finishing .order-status-dot,
 .order-status-pill.is-finishing {
     background: #f5f3ff;
@@ -2568,6 +2705,42 @@ textarea {
 
 .order-status-tab.is-cancelled .order-status-dot {
     background: #ef4444;
+}
+
+.order-status-tab.is-active.is-pending {
+    background: #c2410c;
+}
+
+.order-status-tab.is-active.is-processing {
+    background: #2563eb;
+}
+
+.order-status-tab.is-active.is-finishing {
+    background: #7c3aed;
+}
+
+.order-status-tab.is-active.is-packing {
+    background: #a16207;
+}
+
+.order-status-tab.is-active.is-distribution {
+    background: #0f766e;
+}
+
+.order-status-tab.is-active.is-service {
+    background: #be185d;
+}
+
+.order-status-tab.is-active.is-completed {
+    background: #059669;
+}
+
+.order-status-tab.is-active.is-cancelled {
+    background: #dc2626;
+}
+
+.order-status-tab.is-active .order-status-dot {
+    background: #fff;
 }
 
 .order-status-count {

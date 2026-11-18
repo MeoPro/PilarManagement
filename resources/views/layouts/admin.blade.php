@@ -8,6 +8,10 @@
     @vite(['resources/css/app.css', 'resources/js/spa-navigation.js', 'resources/js/app.js'])
 </head>
 <body>
+    <div class="navigation-progress" role="status" aria-label="Memuat halaman" hidden>
+        <span aria-hidden="true"></span>
+    </div>
+
     @php
         $user = auth()->user();
         $activeBusinessUnit = $user->activeBusinessUnit();
