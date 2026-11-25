@@ -210,6 +210,7 @@ class User extends Authenticatable
             'orders' => 'Daftar Order',
             'revenue' => 'Omzet',
             'order_products' => 'Produk Orderan',
+            'product_stock' => 'Stock Produk',
             'employees' => 'Karyawan',
             'attendance' => 'Absensi',
             'performance' => 'Peforma',

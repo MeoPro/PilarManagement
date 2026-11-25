@@ -40,4 +40,9 @@ class MaterialTransaction extends Model
     {
         return $this->belongsTo(User::class, 'created_by_id');
     }
+
+    public function getQuantityDisplayAttribute(): string
+    {
+        return rtrim(rtrim(number_format((float) $this->quantity, 3, ',', '.'), '0'), ',');
+    }
 }

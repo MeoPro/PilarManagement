@@ -7,14 +7,31 @@
 @php($currentGuestSource = old('guest_source', $order->guest_source ?? ''))
 @php($isCustomGuestSource = $currentGuestSource === '__custom' || ($currentGuestSource !== '' && ! in_array($currentGuestSource, $guestSourceOptions, true)))
 @php($customGuestSource = old('guest_source_custom', $isCustomGuestSource && $currentGuestSource !== '__custom' ? $currentGuestSource : ''))
+@php($productPhotoCount = $order->items->sum(fn ($item) => count($item->status_evidence_images)))
 
-<div class="container">
+<div class="container order-edit-page">
 
     <div class="page-heading">
         <div>
             <p class="page-eyebrow">Penjualan</p>
             <h1>Ubah SPK {{ $order->order_id }}</h1>
             <p>Perbarui informasi pelanggan dan produk pesanan.</p>
+        </div>
+        <div class="page-heading-actions">
+            @if($canRequestOrderCancellation)
+                <form
+                    action="{{ route('orders.cancellations.store', $order) }}"
+                    method="POST"
+                    onsubmit="return confirm('Ajukan pembatalan seluruh order ini ke PF? Nilai order akan dikurangi setelah disetujui.')"
+                >
+                    @csrf
+                    <button type="submit" class="btn">Ajukan cancel seluruh order</button>
+                </form>
+            @endif
+            @if($hasPendingOrderCancellation)
+                <p class="muted" role="status">Permintaan cancel order sedang menunggu keputusan PF.</p>
+            @endif
+            <a class="btn" href="{{ route('orders.show', $order) }}">Kembali ke detail</a>
         </div>
     </div>
 
@@ -170,41 +187,53 @@
                     data-deadline-today="{{ today()->toDateString() }}"
                     data-deadline-minimum-days="1"
                 >
-                    <label for="deadline-date">Deadline tanggal</label>
-                    <input
-                        id="deadline-date"
-                        type="date"
-                        class="date-input"
-                        name="deadline"
-                        value="{{ old('deadline', $order->deadline?->format('Y-m-d')) }}"
-                        min="{{ today()->addDay()->toDateString() }}"
-                        data-deadline-date
-                    >
-                    <label for="deadline-days">Atau dalam hari</label>
-                    <input
-                        id="deadline-days"
-                        type="number"
-                        min="1"
-                        step="1"
-                        data-deadline-days
-                        aria-label="Jumlah hari sampai deadline"
-                    >
+                    <div class="order-edit-deadline-fields">
+                        <div>
+                            <label for="deadline-date">Deadline</label>
+                            <input
+                                id="deadline-date"
+                                type="date"
+                                class="date-input"
+                                name="deadline"
+                                value="{{ old('deadline', $order->deadline?->format('Y-m-d')) }}"
+                                min="{{ today()->addDay()->toDateString() }}"
+                                data-deadline-date
+                            >
+                        </div>
+                        <div>
+                            <label for="deadline-days">Dalam hari</label>
+                            <input
+                                id="deadline-days"
+                                type="number"
+                                min="1"
+                                step="1"
+                                data-deadline-days
+                                aria-label="Jumlah hari sampai deadline"
+                            >
+                        </div>
+                    </div>
                     <small>Ubah jumlah hari atau tanggal; nilai lainnya akan menyesuaikan.</small>
-                    <label for="deadline-change-reason">Alasan percepatan deadline</label>
-                    <textarea
-                        id="deadline-change-reason"
-                        name="deadline_change_reason"
-                        maxlength="1000"
-                        rows="2"
-                        aria-describedby="deadline-change-reason-help"
-                    >{{ old('deadline_change_reason') }}</textarea>
-                    <small id="deadline-change-reason-help">
-                        @if($hasProductionWorkItems)
-                            Wajib diisi jika deadline dipercepat saat ada produk berstatus Produksi.
-                        @else
-                            Wajib diisi jika percepatan deadline memerlukan persetujuan PF.
-                        @endif
-                    </small>
+                    <details
+                        class="order-edit-deadline-reason"
+                        @if(old('deadline_change_reason') || $errors->has('deadline_change_reason')) open @endif
+                    >
+                        <summary>Alasan perubahan deadline</summary>
+                        <label for="deadline-change-reason">Alasan percepatan deadline</label>
+                        <textarea
+                            id="deadline-change-reason"
+                            name="deadline_change_reason"
+                            maxlength="1000"
+                            rows="2"
+                            aria-describedby="deadline-change-reason-help"
+                        >{{ old('deadline_change_reason') }}</textarea>
+                        <small id="deadline-change-reason-help">
+                            @if($hasProductionWorkItems)
+                                Wajib diisi jika deadline dipercepat saat ada produk berstatus Produksi.
+                            @else
+                                Wajib diisi jika percepatan deadline memerlukan persetujuan PF.
+                            @endif
+                        </small>
+                    </details>
                     @if($order->pending_deadline)
                         <small>
                             Pengajuan sebelumnya: {{ $order->pending_deadline->format('d M Y') }}.
@@ -259,7 +288,7 @@
                     class="btn btn-success"
                     onclick="addProduct()"
                 >
-                    + Add Product
+                    + Tambah produk
                 </button>
 
             </div>
@@ -367,7 +396,6 @@
                                     >
                                 @endforeach
                             </div>
-
                         </td>
 
 
@@ -437,6 +465,15 @@
                             @if($itemIsLocked)
                                 {{ $item->qty }}
                                 <input type="hidden" name="items[{{ $index }}][qty]" value="{{ $item->qty }}">
+                                @if($salesWorkflow && ($item->factory_handover_at !== null
+                                    || (int) $item->quality_good_quantity > 0
+                                    || (int) $item->quality_damaged_quantity > 0
+                                    || (int) $item->quality_short_quantity > 0))
+                                    <small class="order-edit-receipt-progress">
+                                        Sudah diterima bagus: {{ (int) $item->quality_good_quantity }} unit<br>
+                                        Belum diterima bagus: {{ max(0, (int) $item->qty - (int) $item->quality_good_quantity) }} unit
+                                    </small>
+                                @endif
                             @else
                             <input
                                 type="number"
@@ -513,22 +550,8 @@
                                 {{ $item->source }}
                                 <input type="hidden" name="items[{{ $index }}][source]" value="{{ $item->source }}">
                             @else
-                            <select
-                                name="items[{{ $index }}][source]"
-                            >
-
-                                @foreach(['Stock','Order'] as $source)
-
-                                    <option
-                                        value="{{ $source }}"
-                                        @selected($item->source === $source)
-                                    >
-                                        {{ $source }}
-                                    </option>
-
-                                @endforeach
-
-                            </select>
+                                {{ $item->source }}
+                                <input type="hidden" name="items[{{ $index }}][source]" value="{{ $item->source }}">
                             @endif
 
                         </td>
@@ -639,13 +662,124 @@
 
 </div>
 
-<section class="card order-discussion" id="order-discussion">
-    <div>
-        <h2>Diskusi Order</h2>
-        <p class="muted">Komentar dapat diubah oleh penulisnya dari detail maupun halaman edit order.</p>
+@if($salesWorkflow)
+    <details class="card order-edit-secondary order-item-cancellation-management">
+        <summary class="order-edit-secondary-summary">
+            <span>Permintaan Pembatalan Produk</span>
+            <span class="order-edit-secondary-meta">{{ $order->items->count() }} produk</span>
+        </summary>
+        <div class="order-edit-secondary-content">
+        @foreach($order->items as $item)
+            @php($pendingCancellationQuantity = $item->cancellationRequests->where('decision', 'pending')->sum('quantity'))
+            <div class="order-item-cancellation-management-row">
+                <strong>{{ $item->product }}</strong>
+                @foreach($item->cancellationRequests as $cancellation)
+                    @php($cancellationLabels = [
+                        'pending' => 'Menunggu keputusan PF',
+                        'approved' => 'Disetujui tanpa stok',
+                        'stock' => 'Dialihkan ke stok PF',
+                        'rejected' => 'Ditolak PF',
+                        'ready_stock' => 'Dibatalkan dan masuk stok',
+                        'ready_cancelled' => 'Dibatalkan tanpa stok',
+                    ])
+                    <small>
+                        Pembatalan {{ $cancellation->quantity }} unit · {{ $cancellationLabels[$cancellation->decision] ?? $cancellation->decision }}
+                        @if($cancellation->decision_note)
+                            · {{ $cancellation->decision_note }}
+                        @endif
+                    </small>
+                @endforeach
+                @if($order->status !== 'Cancel' && (int) $item->qty > $pendingCancellationQuantity)
+                    <form
+                        action="{{ route('order-items.cancellations.store', $item) }}"
+                        method="POST"
+                        class="compact-form order-item-cancellation"
+                    >
+                        @csrf
+                        <label for="cancel-quantity-{{ $item->id }}">Jumlah batal</label>
+                        <input
+                            id="cancel-quantity-{{ $item->id }}"
+                            type="number"
+                            name="quantity"
+                            min="1"
+                            max="{{ (int) $item->qty - $pendingCancellationQuantity }}"
+                            value="1"
+                            required
+                        >
+                        @if($item->status === 'Ready')
+                            <label for="cancel-stock-unit-{{ $item->id }}">Simpan sebagai stok</label>
+                            <select id="cancel-stock-unit-{{ $item->id }}" name="stock_business_unit" required>
+                                <option value="none">Tidak masuk stok</option>
+                                <option value="bali">Stok Bali</option>
+                                <option value="factory">Stok Factory</option>
+                            </select>
+                        @else
+                            <small>PF akan menyetujui, mengalihkan ke stok, atau menolak permintaan ini.</small>
+                        @endif
+                        <button type="submit" class="btn">Kirim permintaan</button>
+                    </form>
+                @endif
+            </div>
+        @endforeach
+        </div>
+    </details>
+
+    @if($productPhotoCount > 0)
+        <details class="card order-edit-secondary order-item-cancellation-management">
+            <summary class="order-edit-secondary-summary">
+                <span>Kelola foto produk</span>
+                <span class="order-edit-secondary-meta">{{ $productPhotoCount }} foto</span>
+            </summary>
+            <div class="order-edit-secondary-content">
+                <p class="muted">Foto hanya ditampilkan pada view order. Di halaman edit, foto dapat dihapus tanpa menampilkan pratinjau.</p>
+                @foreach($order->items as $item)
+                    @if($item->status_evidence_images !== [])
+                        <div class="order-item-cancellation-management-row">
+                            <strong>{{ $item->product }}</strong>
+                            <div class="order-edit-photo-actions">
+                                @foreach(array_keys($item->status_evidence_images) as $imageIndex)
+                                    <span>Foto PB {{ $imageIndex + 1 }}</span>
+                                    @if($order->status !== 'Cancel')
+                                        <form
+                                            action="{{ route('order-products.images.destroy', [$item, 'pb', $imageIndex]) }}"
+                                            method="POST"
+                                            onsubmit="return confirm('Hapus foto PB dari order ini dan katalog produk?')"
+                                        >
+                                            @csrf
+                                            @method('DELETE')
+                                            <button type="submit" class="icon-button delete-button" aria-label="Hapus foto PB {{ $imageIndex + 1 }} {{ $item->product }}" title="Hapus foto PB">
+                                                <x-layout.icon name="trash" />
+                                            </button>
+                                        </form>
+                                    @endif
+                                @endforeach
+                            </div>
+                        </div>
+                    @endif
+                @endforeach
+            </div>
+        </details>
+    @endif
+@endif
+
+<details
+    class="card order-edit-secondary order-discussion"
+    id="order-discussion"
+    @if(session('success') || $errors->any()) open @endif
+>
+    <summary class="order-edit-secondary-summary">
+        <span>Diskusi Order</span>
+        <span class="order-edit-secondary-meta">Buka untuk melihat percakapan</span>
+    </summary>
+    <div class="order-edit-secondary-content">
+        <p class="muted">Kirim dan balas diskusi tanpa meninggalkan halaman edit order.</p>
+        @if(session('success'))
+            <div class="message" role="status">{{ session('success') }}</div>
+        @endif
+        @include('orders.partials.comment-list', ['order' => $order, 'returnTo' => 'edit'])
+        @include('orders.partials.comment-composer', ['order' => $order, 'returnTo' => 'edit'])
     </div>
-    @include('orders.partials.comment-list', ['order' => $order])
-</section>
+</details>
 
 <datalist id="guest-options">
     @foreach($guests as $guest)
@@ -962,7 +1096,7 @@
                     value="1"
                     min="1"
                     required
-                    oninput="calculateTotal()"
+                    oninput="updateStockSource(this.closest('tr')); calculateTotal()"
                 >
             </td>
 
@@ -1002,14 +1136,12 @@
 
             <td>
 
-                <select
+                <input
+                    type="hidden"
                     name="items[${productIndex}][source]"
+                    value="Order"
                 >
-
-                    <option value="Stock">Stock</option>
-                    <option value="Order" selected>Order</option>
-
-                </select>
+                <span data-stock-source-label>Order · Produksi PF</span>
 
             </td>
 
@@ -1036,6 +1168,7 @@
 
 
         container.appendChild(row);
+        updateStockSource(row);
 
         formatPriceInput(row.querySelector('[name*="[price]"]'), true);
 
@@ -1287,6 +1420,35 @@
         preview.hidden = (product?.mockup_urls ?? []).length === 0;
     }
 
+    function updateStockSource(row)
+    {
+        if (!row) {
+            return;
+        }
+
+        const sourceInput = row.querySelector('[name$="[source]"]');
+        const productId = row.querySelector('[name$="[product_id]"]')?.value;
+        const quantity = Number(row.querySelector('[name$="[qty]"]')?.value ?? 1);
+        const product = catalogProducts.find(candidate => String(candidate.id) === String(productId));
+        const stockQuantity = Number(product?.stock_bali_quantity ?? 0)
+            + Number(product?.stock_factory_quantity ?? 0);
+        const canUseStock = product && product.has_factory_sale_price && stockQuantity > 0;
+        const stockUsed = Math.min(stockQuantity, quantity);
+
+        if (sourceInput) {
+            sourceInput.value = canUseStock ? 'Stock' : 'Order';
+        }
+
+        const sourceLabel = row.querySelector('[data-stock-source-label]');
+        if (sourceLabel) {
+            sourceLabel.textContent = canUseStock && stockUsed < quantity
+                ? `Stock ${stockUsed} · Produksi ${quantity - stockUsed}`
+                : canUseStock
+                    ? `Stock · ${stockUsed} unit`
+                    : 'Order · Produksi PF';
+        }
+    }
+
     function updateProductDetails(input, selectedCatalogProductId = null, selectedColor = null)
     {
         const row = input.closest('tr');
@@ -1354,6 +1516,7 @@
             }
         }
 
+        updateStockSource(row);
         calculateTotal();
     }
 

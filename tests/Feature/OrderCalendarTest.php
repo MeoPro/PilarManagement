@@ -109,7 +109,7 @@ test('order and production status changes appear on the calendar', function () {
     $this->assertDatabaseHas('order_events', [
         'order_id' => $order->id,
         'type' => 'order_status_changed',
-        'description' => 'CAL-STATUS: None -> Proses Produksi (berdasarkan status seluruh produk)',
+        'description' => 'CAL-STATUS: None -> Proses Produksi (berdasarkan tahapan produk)',
     ]);
     $this->assertDatabaseHas('order_events', [
         'order_id' => $order->id,

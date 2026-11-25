@@ -25,6 +25,8 @@ class Product extends Model
         'image',
         'mockup',
         'mockups',
+        'factory_mockup',
+        'factory_sale_price',
     ];
 
     protected function casts(): array
@@ -32,6 +34,7 @@ class Product extends Model
         return [
             'category_id' => 'integer',
             'price' => 'decimal:2',
+            'factory_sale_price' => 'decimal:2',
             'colors' => 'array',
             'mockups' => 'array',
         ];
@@ -56,6 +59,11 @@ class Product extends Model
     public function orderItems(): HasMany
     {
         return $this->hasMany(OrderItem::class);
+    }
+
+    public function stockBalances(): HasMany
+    {
+        return $this->hasMany(ProductStock::class);
     }
 
     public static function normalizeDimensions(string $dimensions): string

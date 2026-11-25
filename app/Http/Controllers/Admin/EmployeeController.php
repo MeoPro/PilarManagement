@@ -141,7 +141,7 @@ class EmployeeController extends Controller
             ->orderBy('full_name')
             ->paginate(20)
             ->withQueryString();
-        $availableFactoryQuantity = 'order_items.qty - order_items.qty_completed - order_items.quality_short_quantity - COALESCE((SELECT SUM(subcontractor_assignments.assigned_quantity) FROM subcontractor_assignments WHERE subcontractor_assignments.order_item_id = order_items.id AND subcontractor_assignments.cancelled_at IS NULL), 0) > 0';
+        $availableFactoryQuantity = "(CASE WHEN order_items.factory_status = 'Service' AND order_items.source != 'Stock' THEN order_items.qty - order_items.qty_completed - order_items.quality_short_quantity - order_items.quality_damaged_quantity WHEN COALESCE(order_items.quality_damaged_quantity, 0) > 0 THEN order_items.quality_damaged_quantity ELSE order_items.qty - order_items.qty_completed - order_items.quality_short_quantity END) > 0";
         $pieceworkOrders = $workType === 'Borongan'
             && in_array(User::UNIT_FACTORY, $allowedUnits, true)
             && $unitFilter !== User::UNIT_BALI
@@ -149,13 +149,25 @@ class EmployeeController extends Controller
                 ->where('status', '!=', 'Cancel')
                 ->whereHas('items', fn ($query) => $query
                     ->whereDoesntHave('activeSubcontractorAssignments')
-                    ->where('factory_status', 'Produksi')
+                    ->where(function ($query): void {
+                        $query->whereIn('factory_status', ['Siap Produksi', 'Produksi'])
+                            ->orWhere(function ($serviceQuery): void {
+                                $serviceQuery->where('factory_status', 'Service')
+                                    ->where('source', '!=', 'Stock');
+                            });
+                    })
                     ->whereNotNull('factory_drawing_image')
                     ->whereRaw($availableFactoryQuantity))
                 ->with(['items' => fn ($query) => $query
-                    ->select('id', 'order_id', 'product', 'qty', 'qty_completed', 'quality_short_quantity', 'factory_status', 'factory_drawing_image')
+                    ->select('id', 'order_id', 'product', 'qty', 'qty_completed', 'quality_short_quantity', 'quality_damaged_quantity', 'factory_status', 'factory_drawing_image')
                     ->whereDoesntHave('activeSubcontractorAssignments')
-                    ->where('factory_status', 'Produksi')
+                    ->where(function ($query): void {
+                        $query->whereIn('factory_status', ['Siap Produksi', 'Produksi'])
+                            ->orWhere(function ($serviceQuery): void {
+                                $serviceQuery->where('factory_status', 'Service')
+                                    ->where('source', '!=', 'Stock');
+                            });
+                    })
                     ->whereNotNull('factory_drawing_image')
                     ->whereRaw($availableFactoryQuantity)
                     ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
@@ -167,8 +179,19 @@ class EmployeeController extends Controller
             && in_array(User::UNIT_FACTORY, $allowedUnits, true)
             && $unitFilter !== User::UNIT_BALI
             ? OrderItem::query()
-                ->whereNotNull('factory_drawing_image')
                 ->whereHas('order', fn ($query) => $query->where('status', '!=', 'Cancel'))
+                ->where(function ($query): void {
+                    $query->where(function ($productionQuery): void {
+                        $productionQuery->whereNotNull('factory_drawing_image')
+                            ->where(function ($query): void {
+                                $query->where('quality_damaged_quantity', 0)
+                                    ->orWhere('factory_status', 'Finishing');
+                            });
+                    })->orWhere(function ($serviceQuery): void {
+                        $serviceQuery->where('factory_status', 'Service')
+                            ->where('quality_damaged_quantity', '>', 0);
+                    });
+                })
                 ->where(function ($query): void {
                     $query->whereRaw(
                         'order_items.qty_completed > order_items.quality_good_quantity + order_items.quality_damaged_quantity + order_items.quality_short_quantity + order_items.packed_quantity',
@@ -606,10 +629,17 @@ class EmployeeController extends Controller
                 }
 
                 if ($hasOrderLink && ($order->status === 'Cancel'
-                    || $orderItem->factory_status !== 'Produksi'
+                    || ! in_array($orderItem->factory_status, ['Siap Produksi', 'Produksi'], true)
                     || blank($orderItem->factory_drawing_image))) {
                     throw ValidationException::withMessages([
-                        "piecework_items.{$index}.order_item_id" => 'Produk hanya dapat dikerjakan setelah berstatus Produksi dan memiliki gambar kerja Pilar Factory.',
+                        "piecework_items.{$index}.order_item_id" => 'Produk hanya dapat dikerjakan setelah berstatus Siap Produksi dan memiliki gambar kerja Pilar Factory.',
+                    ]);
+                }
+
+                if ($assignment !== null
+                    && $assignment->is_rework !== ((int) $orderItem->quality_damaged_quantity > 0)) {
+                    throw ValidationException::withMessages([
+                        "piecework_items.{$index}.assignment_id" => 'Jenis penugasan tidak sesuai dengan status produksi ulang produk.',
                     ]);
                 }
             }
@@ -630,6 +660,16 @@ class EmployeeController extends Controller
 
             foreach ($newQuantitiesByItem as $orderItemId => $newQuantity) {
                 $orderItem = $itemsById->get((int) $orderItemId);
+                if ((int) $orderItem->quality_damaged_quantity > 0) {
+                    if ((int) $newQuantity > (int) $orderItem->quality_damaged_quantity) {
+                        throw ValidationException::withMessages([
+                            'piecework_items' => "Jumlah produksi ulang melebihi produk rusak yang tersedia untuk {$orderItem->product}.",
+                        ]);
+                    }
+
+                    continue;
+                }
+
                 $existingPieceworkQuantity = (int) $orderItem->pieceworkItems()->sum('quantity');
                 $alreadyCountedQuantity = max($existingPieceworkQuantity, (int) $orderItem->qty_completed);
 
@@ -707,7 +747,14 @@ class EmployeeController extends Controller
 
                 foreach ($newQuantitiesByItem as $orderItemId => $newQuantity) {
                     $orderItem = $itemsById->get((int) $orderItemId);
+                    $isRework = (int) $orderItem->quality_damaged_quantity > 0;
+                    if ($orderItem->factory_status === 'Siap Produksi') {
+                        $orderItem->update(['factory_status' => 'Produksi']);
+                    }
                     $orderItem->increment('qty_completed', (int) $newQuantity);
+                    if ($isRework) {
+                        $orderItem->decrement('quality_damaged_quantity', (int) $newQuantity);
+                    }
                     $orderItem->refresh()->synchronizeWorkflowStatuses();
 
                     $ordersById->get((int) $orderItem->order_id)?->synchronizeProductionStatusFromItems();

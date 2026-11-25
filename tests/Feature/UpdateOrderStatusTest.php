@@ -4,6 +4,8 @@ use App\Models\Category;
 use App\Models\Color;
 use App\Models\Guest;
 use App\Models\Order;
+use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -100,8 +102,8 @@ test('form order suggests products and selectable categories and preselects the 
     ]);
 
     $this->get(route('orders.create'))
-        ->assertSee('<datalist id="product-options">', false)
-        ->assertSee('<option value="Historical Dining Table">', false)
+        ->assertSee('role="combobox"', false)
+        ->assertSee('"name":"Historical Dining Table"', false)
         ->assertSee('<datalist id="category-options">', false)
         ->assertSee('<option value="Historical Category"></option>', false)
         ->assertSee('list="category-options"', false)
@@ -170,21 +172,32 @@ test('order summary counts this month and archives paid completed orders under t
         'total_order' => 100000,
         'status' => 'None',
     ]);
+    Order::create([
+        'order_id' => 'ORDER-CANCELLED-UNPAID',
+        'guest_name' => 'Cancelled Unpaid Guest',
+        'total_order' => 90000,
+        'status' => 'Cancel',
+    ]);
 
     $response = $this->actingAs($admin)
         ->get(route('orders.index'));
 
     $response
         ->assertSeeText('Total Order Bulan Ini')
+        ->assertSee('<span>Sisa Pembayaran Order Berjalan</span>', false)
+        ->assertSee('<strong>Rp 200,000</strong>', false)
+        ->assertDontSee('<span>Pending</span>', false)
+        ->assertDontSee('<span>Selesai</span>', false)
         ->assertSeeText($currentMonthCompletedOrder->order_id)
         ->assertSeeText($currentMonthActiveOrder->order_id)
         ->assertSeeText($unpaidCompletedOrder->order_id)
+        ->assertSeeText('ORDER-CANCELLED-UNPAID')
         ->assertSeeText($previousMonthActiveOrder->order_id)
         ->assertDontSeeText($archivedOrder->order_id);
 
     $content = $response->getContent();
-    expect(preg_match('/<span>Total Order Bulan Ini<\/span>\s*<strong>2<\/strong>/', $content))->toBe(1)
-        ->and(preg_match('/class="order-status-dot"><\/span>\s*Semua\s*<span class="order-status-count">4<\/span>/', $content))->toBe(1);
+    expect(preg_match('/<span>Total Order Bulan Ini<\/span>\s*<strong>3<\/strong>/', $content))->toBe(1)
+        ->and(preg_match('/class="order-status-dot"><\/span>\s*Semua\s*<span class="order-status-count">5<\/span>/', $content))->toBe(1);
 
     $this->get(route('orders.index', ['status' => 'Selesai']))
         ->assertSeeText($archivedOrder->order_id)
@@ -251,7 +264,7 @@ test('guest list shows completed debt separately from all unpaid non-cancelled o
     $response->assertSee('Hutang')
         ->assertSee('Sisa Pembayaran')
         ->assertSee('Rp 300.000')
-        ->assertSee('Rp 700.000');
+        ->assertSee('Rp 400.000');
 
     expect(Order::where('order_id', 'ORD-DEBT-COMPLETE')->firstOrFail()->is_debt)->toBeTrue()
         ->and(Order::where('order_id', 'ORD-DEBT-IN-PROGRESS')->firstOrFail()->is_debt)->toBeFalse();
@@ -472,7 +485,7 @@ test('deadline internal PF mengurangi satu minggu atau satu bulan sesuai sisa wa
         ->assertSee('22 Jan 2026');
 
     $this->get(route('orders.index', ['search' => 'FACTORY-DEADLINE-three-weeks']))
-        ->assertSee('Target PF:')
+        ->assertDontSee('Target PF:')
         ->assertSee('15/01/2026');
 });
 
@@ -1465,6 +1478,16 @@ test('form order baru tidak menyediakan pilihan status order', function () {
 test('produk Stock baru masuk antrean distribusi PB dan tidak muncul di Factory', function () {
     Storage::fake('public');
     $guest = Guest::create(['name' => 'Guest']);
+    $product = Product::factory()->create([
+        'name' => 'Product One',
+        'dimensions' => '10x10x10',
+        'factory_sale_price' => 100,
+    ]);
+    ProductStock::create([
+        'product_id' => $product->id,
+        'business_unit' => User::UNIT_BALI,
+        'quantity' => 1,
+    ]);
 
     $payload = [
         'order_id' => 'ORD-003',
@@ -1476,6 +1499,7 @@ test('produk Stock baru masuk antrean distribusi PB dan tidak muncul di Factory'
         'items' => [
             [
                 'product' => 'Product One',
+                'product_id' => $product->id,
                 'dimensions' => '10x10x10',
                 'qty' => 1,
                 'price' => 100,
@@ -2183,6 +2207,16 @@ test('Stock backfill moves only unstarted items into PB distribution', function 
 test('adding a Stock item to an existing order sends it directly to the PB queue', function () {
     Storage::fake('public');
     $guest = Guest::create(['name' => 'Updated Stock Guest']);
+    $product = Product::factory()->create([
+        'name' => 'Updated Stock Chair',
+        'dimensions' => '10x10x10',
+        'factory_sale_price' => 10000,
+    ]);
+    ProductStock::create([
+        'product_id' => $product->id,
+        'business_unit' => User::UNIT_BALI,
+        'quantity' => 1,
+    ]);
     $order = Order::create([
         'order_id' => 'UPDATED-STOCK-ITEM',
         'guest_id' => $guest->id,
@@ -2194,6 +2228,7 @@ test('adding a Stock item to an existing order sends it directly to the PB queue
     ]);
     $item = $order->items()->create([
         'product' => 'Updated Stock Chair',
+        'product_id' => $product->id,
         'dimensions' => '10x10x10',
         'qty' => 1,
         'price' => 10000,
@@ -2209,22 +2244,32 @@ test('adding a Stock item to an existing order sends it directly to the PB queue
         'guest_source' => 'Lokal',
         'order_type' => 'Bali',
         'paid_amount' => 0,
-        'items' => [[
-            'id' => $item->id,
-            'product' => $item->product,
-            'dimensions' => $item->dimensions,
-            'qty' => $item->qty,
-            'price' => $item->price,
-            'source' => 'Stock',
-            'status' => 'None',
-            'status_images' => [
-                UploadedFile::fake()->create('stock-inspection.jpg', 100, 'image/jpeg'),
+        'items' => [
+            [
+                'id' => $item->id,
+                'product' => $item->product,
+                'product_id' => $product->id,
+                'dimensions' => $item->dimensions,
+                'qty' => $item->qty,
+                'price' => $item->price,
+                'source' => 'Order',
+                'status' => 'None',
             ],
-        ]],
+            [
+                'product' => $product->name,
+                'product_id' => $product->id,
+                'dimensions' => $product->dimensions,
+                'qty' => 1,
+                'price' => 10000,
+                'source' => 'Stock',
+                'status' => 'None',
+            ],
+        ],
     ])->assertRedirect(route('orders.index'));
 
-    expect($item->fresh()->status)->toBe('Distribusi')
-        ->and($item->fresh()->factory_status)->toBe('None');
+    $stockItem = $order->items()->where('source', 'Stock')->firstOrFail();
+    expect($stockItem->status)->toBe('Distribusi')
+        ->and($stockItem->factory_status)->toBe('None');
 });
 
 test('order baru menolak order id yang sudah digunakan', function () {

@@ -86,6 +86,27 @@ test('authorized Bali admins can create catalog products and other admins cannot
     $this->actingAs($factoryAdmin)->get(route('products.index'))->assertForbidden();
 });
 
+test('product catalog details display the factory mockup saved by PF', function () {
+    Storage::fake('public');
+    $admin = User::factory()->admin()->create([
+        'accessible_menus' => ['products'],
+    ]);
+    $factoryMockupPath = 'catalog/mockups/factory-chair.png';
+    $product = Product::factory()->create([
+        'factory_mockup' => $factoryMockupPath,
+    ]);
+    Storage::disk('public')->put($factoryMockupPath, 'PF mockup');
+
+    $this->actingAs($admin)
+        ->get(route('products.show', $product))
+        ->assertSeeText('Mockup PF (gambar kedua)')
+        ->assertSee(asset('storage/'.$factoryMockupPath), false);
+
+    $this->get(route('products.edit', $product))
+        ->assertSeeText('Mockup PF (gambar kedua)')
+        ->assertSee(asset('storage/'.$factoryMockupPath), false);
+});
+
 test('catalog edit prices omit trailing zero decimals for whole rupiah values', function () {
     $admin = User::factory()->admin()->create([
         'accessible_menus' => ['products'],
@@ -358,7 +379,7 @@ test('changing a catalog product color on an order creates a separate catalog va
         ->and($item->fresh()->status)->toBe('None');
 });
 
-test('order mockups are saved to catalog and reused products start production automatically', function () {
+test('order mockups are saved to catalog while PF remains new until its own data is ready', function () {
     Storage::fake('public');
     Storage::disk('public')->put('catalog/products/reusable-product.jpg', 'product photo');
     $admin = User::factory()->admin()->create();
@@ -427,7 +448,7 @@ test('order mockups are saved to catalog and reused products start production au
     expect($product->fresh()->image)->toBe('catalog/products/reusable-product.jpg')
         ->and($firstItem->fresh()->image)->toBe($firstProductImagePath)
         ->and($firstItem->fresh()->status)->toBe('Produksi')
-        ->and($firstItem->fresh()->factory_status)->toBe('Produksi');
+        ->and($firstItem->fresh()->factory_status)->toBe('None');
     foreach ($catalogMockupPaths as $catalogMockupPath) {
         Storage::disk('public')->assertExists($catalogMockupPath);
     }
@@ -460,7 +481,7 @@ test('order mockups are saved to catalog and reused products start production au
         ->firstOrFail();
 
     expect($secondItem->status)->toBe('Produksi')
-        ->and($secondItem->factory_status)->toBe('Produksi')
+        ->and($secondItem->factory_status)->toBe('None')
         ->and($secondItem->status_evidence_images)->toHaveCount(2)
         ->and($secondItem->image)->not->toBe($catalogMockupPaths[0]);
     foreach ($secondItem->status_evidence_images as $mockupPath) {
@@ -825,4 +846,59 @@ test('escapes untrusted catalog names and colors in the product list', function 
         ->assertSee('&lt;script&gt;', false)
         ->assertSee('&lt;img', false)
         ->assertDontSee('<script>alert(1)</script>', false);
+});
+
+test('PB admins cannot view or change PF catalog prices while owners can', function () {
+    $category = Category::factory()->create();
+    $product = Product::factory()
+        ->for($category)
+        ->create([
+            'price' => 125000,
+            'factory_sale_price' => 40000,
+        ]);
+    $admin = User::factory()->admin()->create([
+        'accessible_menus' => ['products'],
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('products.edit', $product))
+        ->assertSeeText('Harga PB per unit')
+        ->assertDontSeeText('Harga PF per unit')
+        ->assertDontSee('name="factory_sale_price"', false);
+
+    $this->put(route('products.update', $product), [
+        'name' => $product->name,
+        'category_id' => $category->id,
+        'price' => 125000,
+        'factory_sale_price' => 1,
+        'dimensions' => '10x20x30',
+    ])->assertRedirect(route('products.index'));
+
+    expect((float) $product->fresh()->factory_sale_price)->toBe(40000.0);
+    $this->get(route('products.show', $product))
+        ->assertSeeText('Harga PB per unit')
+        ->assertDontSeeText('Harga PF per unit');
+
+    $owner = User::factory()->owner()->create();
+    $this->actingAs($owner)
+        ->get(route('products.edit', $product))
+        ->assertSeeText('Harga PF per unit')
+        ->assertSee('value="40,000"', false);
+});
+
+test('PB order forms receive only a factory-price availability flag', function () {
+    $admin = User::factory()->admin()->create(['accessible_menus' => ['orders']]);
+    $category = Category::factory()->create();
+    Product::factory()
+        ->for($category)
+        ->create([
+            'name' => 'Private Factory Price Chair',
+            'price' => 125000,
+            'factory_sale_price' => 40000,
+        ]);
+
+    $response = $this->actingAs($admin)->get(route('orders.create'));
+
+    $response->assertSee('has_factory_sale_price', false);
+    expect($response->getContent())->not->toContain('"factory_sale_price":40000');
 });

@@ -8,13 +8,22 @@
             <p class="page-eyebrow">Finance · {{ $businessUnitLabel }}</p>
             <h1>Omzet dan Arus Kas</h1>
             <p>
-                @if($isFactoryUnit)
-                    Omzet PF dicatat saat produk diserahkan ke PB; uang masuk tetap mengikuti tanggal pembayaran diterima.
+                @if($isCombinedView)
+                    Ringkasan PB dan PF dalam satu tampilan. Penjualan PF ke PB ditampilkan sebagai transaksi internal terpisah dan tidak dihitung dua kali pada total gabungan.
+                @elseif($isFactoryUnit)
+                    Nilai order PF dipisahkan dari omzet aktual; omzet aktual dihitung sesuai jumlah yang diterima PB.
                 @else
                     Pemasukan dicatat menurut tanggal pembayaran diterima, bukan tanggal order dibuat.
                 @endif
             </p>
         </div>
+        @if(auth()->user()->isOwner())
+            @if($isCombinedView)
+                <a class="btn" href="{{ route('revenue.index', ['from' => $fromDate, 'to' => $toDate]) }}">Lihat unit aktif</a>
+            @else
+                <a class="btn" href="{{ route('revenue.index', ['from' => $fromDate, 'to' => $toDate, 'view' => 'combined']) }}">Omzet Gabungan PB + PF</a>
+            @endif
+        @endif
         @if(auth()->user()->canAccessMenu('expenses'))
             <a class="btn btn-primary" href="{{ route('expenses.create') }}">+ Catat Pengeluaran</a>
         @endif
@@ -25,6 +34,9 @@
     @endif
 
     <form action="{{ route('revenue.index') }}" method="GET" class="search-form orders-filter-form revenue-filter-form">
+        @if($isCombinedView)
+            <input type="hidden" name="view" value="combined">
+        @endif
         <label for="revenue-from">Tanggal mulai
             <input id="revenue-from" type="date" name="from" value="{{ $fromDate }}">
         </label>
@@ -42,11 +54,32 @@
     @endif
 
     <section class="revenue-summary-grid" aria-label="Ringkasan keuangan">
-        @if($isFactoryUnit)
+        @if($isCombinedView)
             <article class="revenue-summary-card is-monthly-orders">
-                <span>Omzet PF ke PB</span>
+                <span>Total order PB bulan ini</span>
+                <strong>Rp {{ number_format($monthlyOrderTotal, 0, ',', '.') }}</strong>
+                <small>Nilai order dibuat bulan ini, tidak termasuk order batal</small>
+            </article>
+            <article class="revenue-summary-card is-monthly-orders">
+                <span>Nilai order PF ke PB</span>
+                <strong>Rp {{ number_format($factoryOrderValueTotal, 0, ',', '.') }}</strong>
+                <small>Proyeksi internal, bukan omzet gabungan aktual</small>
+            </article>
+            <article class="revenue-summary-card is-incoming">
+                <span>Penjualan internal PF ke PB</span>
                 <strong>Rp {{ number_format($factorySaleTotal, 0, ',', '.') }}</strong>
-                <small>Harga jual per unit × jumlah produk yang diserahkan</small>
+                <small>Realisasi PF ditampilkan terpisah dan dieliminasi dari omzet gabungan</small>
+            </article>
+        @elseif($isFactoryUnit)
+            <article class="revenue-summary-card is-monthly-orders">
+                <span>Nilai order PF ke PB</span>
+                <strong>Rp {{ number_format($factoryOrderValueTotal, 0, ',', '.') }}</strong>
+                <small>Harga PF per unit × jumlah order; nilai ini belum dihitung sebagai omzet aktual</small>
+            </article>
+            <article class="revenue-summary-card is-incoming">
+                <span>Omzet terealisasi PF ke PB</span>
+                <strong>Rp {{ number_format($factorySaleTotal, 0, ',', '.') }}</strong>
+                <small>Harga PF per unit × jumlah produk yang diterima PB</small>
             </article>
         @else
             <article class="revenue-summary-card is-monthly-orders">
@@ -56,9 +89,15 @@
             </article>
         @endif
         <article class="revenue-summary-card is-incoming">
-            <span>Total uang masuk</span>
+            <span>{{ $isCombinedView ? 'Uang masuk eksternal gabungan' : 'Total uang masuk' }}</span>
             <strong>Rp {{ number_format($totalIncoming, 0, ',', '.') }}</strong>
-            <small>Termasuk pengembalian cashbond Rp {{ number_format($cashbondRepaymentTotal, 0, ',', '.') }}</small>
+            <small>
+                @if($isCombinedView)
+                    Pembayaran pelanggan PB dan pengembalian cashbond; penjualan PF ke PB tidak dihitung ulang
+                @else
+                    Termasuk pengembalian cashbond Rp {{ number_format($cashbondRepaymentTotal, 0, ',', '.') }}
+                @endif
+            </small>
         </article>
         <article class="revenue-summary-card is-outgoing">
             <span>Total uang keluar</span>
@@ -73,11 +112,25 @@
             </article>
         @endif
         <article class="revenue-summary-card is-cash-net">
-            <span>Arus bersih</span>
+            <span>{{ $isCombinedView ? 'Arus kas gabungan' : 'Arus bersih' }}</span>
             <strong>Rp {{ number_format($netCashFlow, 0, ',', '.') }}</strong>
-            <small>Uang masuk dikurangi uang keluar pada rentang ini</small>
+            <small>{{ $isCombinedView ? 'Uang masuk eksternal gabungan dikurangi seluruh uang keluar PB dan PF' : 'Uang masuk dikurangi uang keluar pada rentang ini' }}</small>
         </article>
     </section>
+
+    @if($isCombinedView)
+        <section class="revenue-outgoing-breakdown" aria-label="Ringkasan per unit">
+            <strong>Ringkasan per unit</strong>
+            @foreach($unitSummaries as $unitSummary)
+                <span>
+                    {{ $unitSummary['label'] }} · Masuk Rp {{ number_format($unitSummary['incoming'], 0, ',', '.') }}
+                    · Keluar Rp {{ number_format($unitSummary['outgoing'], 0, ',', '.') }}
+                    · Bersih Rp {{ number_format($unitSummary['net'], 0, ',', '.') }}
+                </span>
+            @endforeach
+            <small>Uang masuk PF mencakup penjualan internal ke PB dan tidak ditambahkan lagi ke total gabungan.</small>
+        </section>
+    @endif
 
     <section class="revenue-outgoing-breakdown" aria-label="Rincian uang keluar">
         <strong>Rincian uang keluar</strong>
@@ -91,7 +144,13 @@
         <div class="revenue-transactions-heading">
             <div>
                 <h2>Detail transaksi</h2>
-                <p>Pembayaran, omzet PF, dan pengeluaran sesuai tanggal transaksi.</p>
+                <p>
+                    @if($isCombinedView)
+                        Pembayaran eksternal, penjualan internal PF ke PB, nilai order, dan pengeluaran sesuai tanggal transaksi.
+                    @else
+                        Pembayaran, nilai order PF, omzet terealisasi, dan pengeluaran sesuai tanggal transaksi.
+                    @endif
+                </p>
             </div>
             <span>{{ $transactions->total() }} transaksi</span>
         </div>
@@ -112,13 +171,17 @@
                         <tr>
                             <td>{{ \Illuminate\Support\Carbon::parse($transaction->transaction_date, auth()->user()->timezone())->format('d/m/Y') }}</td>
                             <td>
-                                <span class="revenue-direction-badge {{ $transaction->direction === 'Masuk' ? 'is-incoming' : ($transaction->direction === 'Omzet' ? 'is-revenue' : 'is-outgoing') }}">
+                                <span class="revenue-direction-badge {{ $transaction->direction === 'Masuk' ? 'is-incoming' : ($transaction->direction === 'Internal' ? 'is-internal' : (in_array($transaction->direction, ['Omzet', 'Order'], true) ? 'is-revenue' : 'is-outgoing')) }}">
                                     {{ $transaction->direction }} · {{ $transaction->category }}
                                 </span>
                             </td>
                             <td>
-                                @if((int) $transaction->order_pk > 0)
+                                @if((int) $transaction->order_pk > 0 && auth()->user()->canAccessMenu('orders'))
                                     <a href="{{ route('orders.show', $transaction->order_pk) }}">{{ $transaction->reference }}</a>
+                                @elseif((int) $transaction->material_pk > 0 && auth()->user()->canAccessMenu('materials'))
+                                    <a href="{{ route('materials.show', $transaction->material_pk) }}">{{ $transaction->reference }}</a>
+                                @elseif((int) $transaction->expense_pk > 0 && auth()->user()->canAccessMenu('expenses'))
+                                    <a href="{{ route('expenses.show', $transaction->expense_pk) }}">{{ $transaction->reference }}</a>
                                 @else
                                     <strong>{{ $transaction->reference }}</strong>
                                 @endif
@@ -126,9 +189,12 @@
                                 @if($transaction->category === 'Gaji')
                                     <small>Periode {{ $transaction->reference }}</small>
                                 @endif
+                                @if($transaction->direction === 'Order')
+                                    <small>Nilai order, belum dihitung sebagai omzet aktual</small>
+                                @endif
                             </td>
                             <td>{{ $transaction->note ?? '—' }}</td>
-                            <td class="{{ $transaction->direction === 'Masuk' ? 'revenue-amount-in' : ($transaction->direction === 'Omzet' ? 'revenue-amount-revenue' : 'revenue-amount-out') }}">
+                            <td class="{{ $transaction->direction === 'Masuk' ? 'revenue-amount-in' : ($transaction->direction === 'Internal' ? 'revenue-amount-internal' : (in_array($transaction->direction, ['Omzet', 'Order'], true) ? 'revenue-amount-revenue' : 'revenue-amount-out')) }}">
                                 @if($transaction->direction === 'Masuk')
                                     +
                                 @elseif($transaction->direction === 'Keluar')

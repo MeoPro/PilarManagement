@@ -38,4 +38,18 @@ class Material extends Model
             3,
         );
     }
+
+    public function getCurrentStockDisplayAttribute(): string
+    {
+        return rtrim(rtrim(number_format($this->current_stock, 3, ',', '.'), '0'), ',');
+    }
+
+    public function getAverageUnitPriceAttribute(): ?float
+    {
+        if ($this->current_stock <= 0) {
+            return null;
+        }
+
+        return round((float) ($this->current_inventory_value ?? 0) / $this->current_stock, 2);
+    }
 }

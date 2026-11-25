@@ -9,11 +9,14 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Expense extends Model
 {
+    public const CATEGORIES = ['Material', 'Additional'];
+
     /** @use HasFactory<ExpenseFactory> */
     use HasFactory;
 
     protected $fillable = [
         'business_unit',
+        'category',
         'description',
         'quantity',
         'unit',

@@ -13,9 +13,12 @@ document.addEventListener('click', (event) => {
         const isCancellation = action === 'cancel';
         const remaining = Math.max(Number.parseInt(trigger.dataset.pieceworkRemaining ?? '0', 10) || 0, 0);
         const quantity = form.querySelector('[data-piecework-action-quantity]');
+        const note = form.querySelector('[data-piecework-action-note]');
         const methodOverride = form.querySelector('[data-piecework-method]');
 
-        if (!(quantity instanceof HTMLInputElement) || !(methodOverride instanceof HTMLInputElement)) {
+        if (!(quantity instanceof HTMLInputElement)
+            || !(note instanceof HTMLTextAreaElement)
+            || !(methodOverride instanceof HTMLInputElement)) {
             return;
         }
 
@@ -35,6 +38,10 @@ document.addEventListener('click', (event) => {
         form.querySelector('[data-piecework-action-submit]').textContent = isCancellation
             ? 'Konfirmasi pembatalan'
             : 'Konfirmasi penyelesaian';
+        form.querySelector('[data-piecework-note-label]').textContent = isCancellation
+            ? 'Alasan pembatalan'
+            : 'Catatan penyelesaian (opsional)';
+        note.required = isCancellation;
 
         if (!dialog.open) {
             dialog.showModal();

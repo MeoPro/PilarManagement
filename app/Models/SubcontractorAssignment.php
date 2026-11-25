@@ -20,6 +20,7 @@ class SubcontractorAssignment extends Model
         'target_deadline',
         'qty_completed',
         'status',
+        'is_rework',
         'cancelled_at',
     ];
 
@@ -29,6 +30,7 @@ class SubcontractorAssignment extends Model
             'assigned_quantity' => 'integer',
             'target_deadline' => 'date',
             'qty_completed' => 'integer',
+            'is_rework' => 'boolean',
             'cancelled_at' => 'datetime',
         ];
     }

@@ -21,10 +21,12 @@ class OrderCommentController extends Controller
         $user = $request->user();
         $accessibleUnits = $user->accessibleUnits();
         abort_if($accessibleUnits === [], 403);
+        $returnTargets = $user->isSalesWorkflow() ? ['show', 'edit'] : ['show'];
 
         $rules = [
             'body' => ['required', 'string', 'max:5000'],
             'parent_id' => ['nullable', 'integer'],
+            'return_to' => ['nullable', Rule::in($returnTargets)],
         ];
 
         if (count($accessibleUnits) > 1) {
@@ -40,9 +42,9 @@ class OrderCommentController extends Controller
         if (! empty($validated['parent_id'])) {
             $parent = $order->comments()->find($validated['parent_id']);
 
-            if (! $parent) {
+            if (! $parent || $parent->retracted_at !== null) {
                 throw ValidationException::withMessages([
-                    'parent_id' => 'Balasan harus berada dalam diskusi order ini.',
+                    'parent_id' => 'Balasan harus berada pada pesan aktif dalam diskusi order ini.',
                 ]);
             }
         }
@@ -86,12 +88,10 @@ class OrderCommentController extends Controller
         });
 
         if ($request->expectsJson()) {
-            $comment->load(['author', 'replies.author']);
+            $comment->load(['author', 'retractedBy', 'replies.author', 'replies.retractedBy']);
             $comment->loadCount(['readRecipients', 'replies']);
 
-            $html = $comment->parent_id === null
-                ? view('orders.partials.comment-thread', compact('comment', 'order'))->render()
-                : view('orders.partials.comment-entry', compact('comment'))->render();
+            $html = $this->renderCommentHtml($comment, $order, $validated['return_to'] ?? 'show');
 
             return response()->json([
                 'comment' => [
@@ -103,32 +103,34 @@ class OrderCommentController extends Controller
             ]);
         }
 
-        return redirect()
-            ->route('orders.show', $order)
+        return $this->redirectToOrder($order, $validated['return_to'] ?? 'show')
             ->with('success', 'Komentar berhasil dikirim.');
     }
 
     public function update(Request $request, Order $order, OrderComment $comment): JsonResponse|RedirectResponse
     {
-        abort_unless($comment->user_id === $request->user()->id, 403);
+        abort_unless($comment->user_id === $request->user()->id && $comment->retracted_at === null, 403);
+        $returnTargets = $request->user()->isSalesWorkflow() ? ['show', 'edit'] : ['show'];
 
         $validated = $request->validate([
             'body' => ['required', 'string', 'max:5000'],
+            'return_to' => ['nullable', Rule::in($returnTargets)],
         ]);
 
-        DB::transaction(function () use ($comment, $validated): void {
+        $body = trim($validated['body']);
+
+        DB::transaction(function () use ($comment, $body): void {
             $comment->update([
-                'body' => trim($validated['body']),
+                'body' => $body,
+                'edited_at' => now(),
             ]);
         });
 
-        $comment->refresh()->load(['author', 'replies.author']);
+        $comment->refresh()->load(['author', 'retractedBy', 'replies.author', 'replies.retractedBy']);
         $comment->loadCount(['readRecipients', 'replies']);
 
         if ($request->expectsJson()) {
-            $html = $comment->parent_id === null
-                ? view('orders.partials.comment-thread', compact('comment', 'order'))->render()
-                : view('orders.partials.comment-entry', compact('comment'))->render();
+            $html = $this->renderCommentHtml($comment, $order, $validated['return_to'] ?? 'show');
 
             return response()->json([
                 'comment' => [
@@ -140,9 +142,57 @@ class OrderCommentController extends Controller
             ]);
         }
 
-        return redirect()
-            ->route('orders.show', $order)
+        return $this->redirectToOrder($order, $validated['return_to'] ?? 'show')
             ->with('success', 'Komentar berhasil diperbarui.');
+    }
+
+    public function retract(Request $request, Order $order, OrderComment $comment): JsonResponse|RedirectResponse
+    {
+        abort_unless($request->user()->is_admin, 403);
+        $returnTargets = $request->user()->isSalesWorkflow() ? ['show', 'edit'] : ['show'];
+
+        $validated = $request->validate([
+            'return_to' => ['nullable', Rule::in($returnTargets)],
+        ]);
+        $returnTo = $validated['return_to'] ?? 'show';
+
+        DB::transaction(function () use ($order, $comment, $request): void {
+            $lockedComment = $order->comments()
+                ->whereKey($comment->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+            if ($lockedComment->retracted_at !== null) {
+                return;
+            }
+
+            $lockedComment->update([
+                'retracted_at' => now(),
+                'retracted_by_id' => $request->user()->id,
+            ]);
+            $lockedComment->recipients()
+                ->whereNull('read_at')
+                ->update([
+                    'read_at' => now(),
+                    'updated_at' => now(),
+                ]);
+        });
+
+        $comment->refresh()->load(['author', 'retractedBy', 'replies.author', 'replies.retractedBy']);
+        $comment->loadCount(['readRecipients', 'replies']);
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'comment' => [
+                    'id' => $comment->id,
+                    'parent_id' => $comment->parent_id,
+                ],
+                'html' => $this->renderCommentHtml($comment, $order, $returnTo),
+                'message' => 'Pesan berhasil ditarik.',
+            ]);
+        }
+
+        return $this->redirectToOrder($order, $returnTo)
+            ->with('success', 'Pesan berhasil ditarik dari diskusi.');
     }
 
     public function reminders(Request $request): JsonResponse
@@ -156,7 +206,9 @@ class OrderCommentController extends Controller
             ->where('user_id', $request->user()->id)
             ->whereNull('read_at')
             ->whereNull('reminded_at')
-            ->whereHas('comment', fn ($query) => $query->where('created_at', '<=', now()->subDays(2)))
+            ->whereHas('comment', fn ($query) => $query
+                ->whereNull('retracted_at')
+                ->where('created_at', '<=', now()->subDays(2)))
             ->oldest()
             ->limit(10)
             ->get();
@@ -173,6 +225,9 @@ class OrderCommentController extends Controller
                 'updated_at' => now(),
             ]);
 
+        $timezone = $request->user()->timezone();
+        $timezoneLabel = $request->user()->timezoneLabel();
+
         return response()->json([
             'reminders' => $recipients->map(fn (OrderCommentRecipient $recipient): array => [
                 'order_id' => $recipient->comment->order->order_id,
@@ -181,8 +236,20 @@ class OrderCommentController extends Controller
                 'business_unit' => $recipient->comment->business_unit,
                 'body' => Str::limit($recipient->comment->body, 140),
                 'has_replies' => $recipient->comment->replies_count > 0,
-                'created_at' => $recipient->comment->created_at->format('d/m/Y H:i'),
+                'created_at' => $recipient->comment->created_at->copy()->setTimezone($timezone)->format('d/m/Y H:i').' '.$timezoneLabel,
             ])->values(),
         ]);
+    }
+
+    private function renderCommentHtml(OrderComment $comment, Order $order, string $returnTo): string
+    {
+        return $comment->parent_id === null
+            ? view('orders.partials.comment-thread', compact('comment', 'order', 'returnTo'))->render()
+            : view('orders.partials.comment-entry', compact('comment', 'returnTo'))->render();
+    }
+
+    private function redirectToOrder(Order $order, string $returnTo): RedirectResponse
+    {
+        return redirect()->route($returnTo === 'edit' ? 'orders.edit' : 'orders.show', $order);
     }
 }

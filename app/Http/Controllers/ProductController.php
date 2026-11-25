@@ -15,28 +15,42 @@ use RuntimeException;
 
 class ProductController extends Controller
 {
-    public function index(): View
+    public function index(Request $request): View
     {
         $products = Product::query()
             ->with('category:id,name')
             ->orderBy('name')
             ->paginate(20);
 
-        return view('products.index', compact('products'));
+        return view('products.index', [
+            'products' => $products,
+            'showFactorySalePrice' => $request->user()->isOwner(),
+        ]);
     }
 
-    public function create(): View
+    public function create(Request $request): View
     {
-        return view('products.create', $this->formData());
+        return view('products.create', [
+            ...$this->formData(),
+            'showFactorySalePrice' => $request->user()->isOwner(),
+        ]);
     }
 
     public function store(Request $request): RedirectResponse
     {
         $this->normalizePrice($request);
+        if ($request->user()->isOwner()) {
+            $this->normalizeFactorySalePrice($request);
+        }
         $this->normalizeDimensions($request);
-        $validated = $request->validate($this->validationRules());
+        $rules = $this->validationRules();
+        if (! $request->user()->isOwner()) {
+            unset($rules['factory_sale_price']);
+        }
+        $validated = $request->validate($rules);
         $imagePath = null;
         $mockupPaths = $this->storeMockups($this->mockupFilesFromRequest($request));
+        $factoryMockupPath = $this->storeFactoryMockup($request);
         $sku = trim((string) ($validated['sku'] ?? ''));
 
         if ($request->hasFile('image')) {
@@ -51,11 +65,15 @@ class ProductController extends Controller
             'sku' => $sku === '' ? null : $sku,
             'category_id' => $validated['category_id'],
             'price' => $validated['price'],
+            'factory_sale_price' => $request->user()->isOwner()
+                ? ($validated['factory_sale_price'] ?? null)
+                : null,
             'dimensions' => $validated['dimensions'],
             'colors' => $this->normalizeColors($validated['colors'] ?? []),
             'image' => $imagePath,
             'mockup' => $mockupPaths[0] ?? null,
             'mockups' => $mockupPaths ?: null,
+            'factory_mockup' => $factoryMockupPath,
         ]);
 
         return redirect()
@@ -63,30 +81,43 @@ class ProductController extends Controller
             ->with('success', 'Produk katalog berhasil ditambahkan.');
     }
 
-    public function edit(Product $product): View
+    public function edit(Request $request, Product $product): View
     {
         return view('products.edit', [
             ...$this->formData(),
             'product' => $product,
+            'showFactorySalePrice' => $request->user()->isOwner(),
         ]);
     }
 
-    public function show(Product $product): View
+    public function show(Request $request, Product $product): View
     {
         $product->load('category:id,name');
 
-        return view('products.show', compact('product'));
+        return view('products.show', [
+            'product' => $product,
+            'showFactorySalePrice' => $request->user()->isOwner(),
+        ]);
     }
 
     public function update(Request $request, Product $product): RedirectResponse
     {
         $this->normalizePrice($request);
+        if ($request->user()->isOwner()) {
+            $this->normalizeFactorySalePrice($request);
+        }
         $this->normalizeDimensions($request);
-        $validated = $request->validate($this->validationRules());
+        $rules = $this->validationRules();
+        if (! $request->user()->isOwner()) {
+            unset($rules['factory_sale_price']);
+        }
+        $validated = $request->validate($rules);
         $imagePath = $product->image;
         $previousImagePath = null;
         $mockupPaths = $product->mockupPaths();
         $previousMockupPaths = [];
+        $factoryMockupPath = $product->factory_mockup;
+        $previousFactoryMockupPath = null;
         $sku = trim((string) ($validated['sku'] ?? ''));
 
         if ($request->hasFile('image')) {
@@ -103,6 +134,11 @@ class ProductController extends Controller
             $mockupPaths = $this->storeMockups($this->mockupFilesFromRequest($request));
         }
 
+        if ($request->hasFile('factory_mockup')) {
+            $previousFactoryMockupPath = $product->factory_mockup;
+            $factoryMockupPath = $this->storeFactoryMockup($request);
+        }
+
         $product->update([
             'name' => trim($validated['name']),
             'sku' => array_key_exists('sku', $validated)
@@ -110,11 +146,16 @@ class ProductController extends Controller
                 : $product->sku,
             'category_id' => $validated['category_id'],
             'price' => $validated['price'],
+            'factory_sale_price' => $request->user()->isOwner()
+                && array_key_exists('factory_sale_price', $validated)
+                ? $validated['factory_sale_price']
+                : $product->factory_sale_price,
             'dimensions' => $validated['dimensions'],
             'colors' => $this->normalizeColors($validated['colors'] ?? []),
             'image' => $imagePath,
             'mockup' => $mockupPaths[0] ?? null,
             'mockups' => $mockupPaths ?: null,
+            'factory_mockup' => $factoryMockupPath,
         ]);
 
         if ($previousImagePath !== null) {
@@ -123,6 +164,10 @@ class ProductController extends Controller
 
         foreach ($previousMockupPaths as $previousMockupPath) {
             Storage::disk('public')->delete($previousMockupPath);
+        }
+
+        if ($previousFactoryMockupPath !== null) {
+            Storage::disk('public')->delete($previousFactoryMockupPath);
         }
 
         return redirect()
@@ -134,6 +179,7 @@ class ProductController extends Controller
     {
         $imagePath = $product->image;
         $mockupPaths = $product->mockupPaths();
+        $factoryMockupPath = $product->factory_mockup;
         $product->delete();
 
         if ($imagePath !== null) {
@@ -142,6 +188,10 @@ class ProductController extends Controller
 
         foreach ($mockupPaths as $mockupPath) {
             Storage::disk('public')->delete($mockupPath);
+        }
+
+        if ($factoryMockupPath !== null) {
+            Storage::disk('public')->delete($factoryMockupPath);
         }
 
         return redirect()
@@ -174,13 +224,29 @@ class ProductController extends Controller
             'sku' => ['nullable', 'string', 'max:100'],
             'category_id' => ['required', 'integer', 'exists:categories,id'],
             'price' => ['required', 'numeric', 'min:0'],
+            'factory_sale_price' => ['nullable', 'numeric', 'min:0'],
             'dimensions' => ['required', 'string', 'max:100', 'regex:'.Product::DIMENSIONS_PATTERN],
             'colors' => ['nullable', 'array', 'max:2'],
             'colors.*' => ['nullable', 'string', 'max:255'],
             'image' => ['nullable', 'image', 'max:5120'],
             'mockups' => ['nullable', 'array', 'max:10'],
             'mockups.*' => ['image', 'max:5120'],
+            'factory_mockup' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
         ];
+    }
+
+    private function storeFactoryMockup(Request $request): ?string
+    {
+        if (! $request->hasFile('factory_mockup')) {
+            return null;
+        }
+
+        $factoryMockupPath = $request->file('factory_mockup')->store('catalog/mockups', 'public');
+        if (! is_string($factoryMockupPath)) {
+            throw new RuntimeException('Mockup PF gagal disimpan ke katalog.');
+        }
+
+        return $factoryMockupPath;
     }
 
     /**
@@ -229,6 +295,21 @@ class ProductController extends Controller
 
         if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $price) === 1) {
             $request->merge(['price' => str_replace(',', '', $price)]);
+        }
+    }
+
+    private function normalizeFactorySalePrice(Request $request): void
+    {
+        $price = $request->input('factory_sale_price');
+
+        if (! is_string($price)) {
+            return;
+        }
+
+        $price = trim($price);
+
+        if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $price) === 1) {
+            $request->merge(['factory_sale_price' => str_replace(',', '', $price)]);
         }
     }
 

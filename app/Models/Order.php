@@ -30,6 +30,7 @@ class Order extends Model
         'last_edit',
         'status',
         'note',
+        'is_stock_order',
     ];
 
     protected $casts = [
@@ -42,6 +43,7 @@ class Order extends Model
         'total_order' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'opening_paid_amount' => 'decimal:2',
+        'is_stock_order' => 'boolean',
     ];
 
     protected static function booted(): void
@@ -117,7 +119,10 @@ class Order extends Model
 
         $items = $this->relationLoaded('items')
             ? $this->items
-            : $this->items()->with('activeSubcontractorAssignments')->get();
+            : $this->items()->with([
+                'activeSubcontractorAssignments',
+                'cancellationRequests' => fn ($query) => $query->where('decision', 'pending'),
+            ])->get();
 
         return $items->every(function (OrderItem $item): bool {
             $hasActiveSubcontractorAssignments = array_key_exists('active_subcontracted_quantity', $item->getAttributes())
@@ -125,11 +130,15 @@ class Order extends Model
                 : ($item->relationLoaded('activeSubcontractorAssignments')
                     ? $item->activeSubcontractorAssignments->isNotEmpty()
                     : $item->activeSubcontractorAssignments()->exists());
+            $hasPendingCancellation = $item->relationLoaded('cancellationRequests')
+                ? $item->cancellationRequests->contains(fn (OrderItemCancellation $cancellation): bool => $cancellation->decision === 'pending')
+                : $item->cancellationRequests()->where('decision', 'pending')->exists();
 
             return $item->status === 'None'
                 && $item->factory_status === 'None'
                 && (int) $item->qty_completed === 0
-                && ! $hasActiveSubcontractorAssignments;
+                && ! $hasActiveSubcontractorAssignments
+                && ! $hasPendingCancellation;
         });
     }
 
@@ -222,23 +231,44 @@ class Order extends Model
             return;
         }
 
+        $serviceItemIds = collect();
+        if ($items !== null) {
+            $serviceItemIds = OrderItemService::query()
+                ->whereIn('order_item_id', $items->modelKeys())
+                ->where('status', 'Service')
+                ->where('quantity', '>', 0)
+                ->distinct()
+                ->pluck('order_item_id')
+                ->merge($items->where('status', 'Service')->modelKeys())
+                ->unique()
+                ->intersect(
+                    $items
+                        ->filter(fn (OrderItem $item): bool => $item->status !== 'Cancel' && (int) $item->qty > 0)
+                        ->modelKeys(),
+                );
+        }
+
         $itemStatuses = $items === null
             ? $this->items()
                 ->selectRaw(
                     'COUNT(*) AS total_items,
+                    SUM(CASE WHEN status = ? OR qty <= 0 THEN 1 ELSE 0 END) AS cancelled_items,
                     SUM(CASE WHEN source != ? AND status = ? THEN 1 ELSE 0 END) AS new_order_items,
-                    SUM(CASE WHEN EXISTS (SELECT 1 FROM order_item_services AS services WHERE services.order_item_id = order_items.id AND services.status = ? AND services.quantity > 0) THEN 1 ELSE 0 END) AS service_items,
+                    SUM(CASE WHEN (order_items.status = ? OR EXISTS (SELECT 1 FROM order_item_services AS services WHERE services.order_item_id = order_items.id AND services.status = ? AND services.quantity > 0)) AND order_items.status != ? AND order_items.qty > 0 THEN 1 ELSE 0 END) AS service_items,
                     SUM(CASE WHEN status IN (?, ?) OR factory_status IN (?, ?) THEN 1 ELSE 0 END) AS production_items,
                     SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS finishing_items,
                     SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS packing_items,
                     SUM(CASE WHEN source != ? AND (status = ? OR factory_status = ?) THEN 1 ELSE 0 END) AS distributed_order_items,
-                    SUM(CASE WHEN source = ? THEN 1 ELSE 0 END) AS stock_items,
-                    SUM(CASE WHEN source != ? THEN 1 ELSE 0 END) AS order_items,
-                    SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS ready_items',
+                    SUM(CASE WHEN source = ? AND status != \'Cancel\' AND qty > 0 THEN 1 ELSE 0 END) AS stock_items,
+                    SUM(CASE WHEN source != ? AND status != \'Cancel\' AND qty > 0 THEN 1 ELSE 0 END) AS order_items,
+                    SUM(CASE WHEN status = ? AND qty > 0 THEN 1 ELSE 0 END) AS ready_items',
                     [
+                        'Cancel',
                         'Stock',
                         'None',
                         'Service',
+                        'Service',
+                        'Cancel',
                         'Produksi',
                         'Produksi',
                         'Produksi',
@@ -260,15 +290,13 @@ class Order extends Model
                 ->first()
             : (object) [
                 'total_items' => $items->count(),
+                'cancelled_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->status === 'Cancel' || (int) $item->qty <= 0)
+                    ->count(),
                 'new_order_items' => $items
                     ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock' && $item->status === 'None')
                     ->count(),
-                'service_items' => OrderItemService::query()
-                    ->whereIn('order_item_id', $items->modelKeys())
-                    ->where('status', 'Service')
-                    ->where('quantity', '>', 0)
-                    ->distinct()
-                    ->count('order_item_id'),
+                'service_items' => $serviceItemIds->count(),
                 'production_items' => $items
                     ->filter(fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true))
                     ->count(),
@@ -284,28 +312,40 @@ class Order extends Model
                     ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock'
                         && in_array('Distribusi', [$item->status, $item->factory_status], true))
                     ->count(),
-                'stock_items' => $items->where('source', 'Stock')->count(),
-                'order_items' => $items->where('source', '!=', 'Stock')->count(),
-                'ready_items' => $items->where('status', 'Ready')->count(),
+                'stock_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source === 'Stock'
+                        && $item->status !== 'Cancel'
+                        && (int) $item->qty > 0)
+                    ->count(),
+                'order_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->source !== 'Stock'
+                        && $item->status !== 'Cancel'
+                        && (int) $item->qty > 0)
+                    ->count(),
+                'ready_items' => $items
+                    ->filter(fn (OrderItem $item): bool => $item->status === 'Ready' && (int) $item->qty > 0)
+                    ->count(),
             ];
 
         if (! $itemStatuses || (int) $itemStatuses->total_items === 0) {
             return;
         }
 
+        $remainingItems = (int) $itemStatuses->total_items - (int) $itemStatuses->cancelled_items;
         $hasMixedStockItems = (int) $itemStatuses->stock_items > 0
             && (int) $itemStatuses->order_items > 0;
 
         $nextStatus = match (true) {
+            $remainingItems === 0 => 'Cancel',
             (int) $itemStatuses->new_order_items > 0 => 'None',
             (int) $itemStatuses->production_items > 0 => 'Proses Produksi',
             (int) $itemStatuses->finishing_items > 0 => 'Finishing',
             $hasMixedStockItems
                 && (int) $itemStatuses->service_items === 0
-                && (int) $itemStatuses->ready_items < (int) $itemStatuses->total_items => 'Finishing',
+                && (int) $itemStatuses->ready_items < $remainingItems => 'Finishing',
             (int) $itemStatuses->packing_items > 0 => 'Packing',
             (int) $itemStatuses->service_items > 0 => 'Service',
-            (int) $itemStatuses->ready_items === (int) $itemStatuses->total_items => 'Selesai',
+            (int) $itemStatuses->ready_items === $remainingItems => 'Selesai',
             (int) $itemStatuses->distributed_order_items > 0 => 'Distribusi',
             (int) $itemStatuses->stock_items > 0 => 'Distribusi',
             default => null,

@@ -10,7 +10,9 @@ use App\Models\GuestPhone;
 use App\Models\Order;
 use App\Models\OrderCommentRecipient;
 use App\Models\OrderItem;
+use App\Models\PieceworkAssignment;
 use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\Subcontractor;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -29,10 +31,12 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class OrderController extends Controller
 {
     private const FACTORY_ORDER_ITEM_STATUSES = [
+        'Siap Produksi',
         'Produksi',
         'Proses Kirim',
         'Distribusi',
         'Dalam Perjalanan',
+        'Service',
         'Finishing',
         'Packing',
         'Ready',
@@ -75,7 +79,8 @@ class OrderController extends Controller
         }
         $deadlineSortExpression = $factoryWorkflow ? 'COALESCE(factory_deadline, deadline)' : 'deadline';
 
-        $orderQuery = Order::query();
+        $orderQuery = Order::query()
+            ->when(! $factoryWorkflow, fn (Builder $query): Builder => $query->where('is_stock_order', false));
 
         if (! $canManageSales) {
             $orderQuery->select([
@@ -104,6 +109,7 @@ class OrderController extends Controller
                         ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
                         ->orderBy('id'),
                     'items.category',
+                    'items.cancellationRequests',
                     'guest',
                 ]
                 : [
@@ -165,28 +171,69 @@ class OrderController extends Controller
 
         $orders = $orders->oldest('id')->paginate(10)->withQueryString();
 
+        if ($factoryWorkflow) {
+            foreach ($orders as $order) {
+                $order->factory_days_remaining = $order->factory_deadline === null
+                    ? null
+                    : (int) now($user->timezone())->startOfDay()->diffInDays(
+                        $order->factory_deadline->copy()->startOfDay(),
+                        false,
+                    );
+                $order->factory_revenue = (float) $order->items
+                    ->filter(fn (OrderItem $item): bool => $item->factory_handover_at !== null
+                        && $item->factory_sale_price !== null)
+                    ->sum(fn (OrderItem $item): float => (float) $item->factory_sale_price * (int) $item->qty);
+            }
+
+        }
+
         if ($canManageSales) {
             foreach ($orders as $order) {
                 $order->synchronizeProductionStatusFromItems($order->items);
+                $order->setAttribute(
+                    'can_request_order_cancellation',
+                    $this->canRequestOrderCancellation($order),
+                );
+                $order->setAttribute(
+                    'has_pending_order_cancellation',
+                    $this->hasPendingOrderCancellation($order),
+                );
             }
         }
 
-        $orderStats = Order::query()->selectRaw(
-            'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
-            ['None', 'None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai'],
-        )->first();
+        $orderStats = Order::query()
+            ->when(! $factoryWorkflow, fn (Builder $query): Builder => $query->where('is_stock_order', false))
+            ->selectRaw(
+                'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending_orders, SUM(CASE WHEN status IN (?, ?, ?, ?, ?, ?) THEN 1 ELSE 0 END) AS active_orders, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed_orders',
+                ['None', 'None', 'Proses Produksi', 'Finishing', 'Packing', 'Distribusi', 'Service', 'Selesai'],
+            )->first();
         $orderStats->total_orders = Order::query()
+            ->when(! $factoryWorkflow, fn (Builder $query): Builder => $query->where('is_stock_order', false))
             ->whereDate('created_at', '>=', $monthStartDate)
             ->whereDate('created_at', '<', $nextMonthStartDate)
             ->count();
 
+        if ($factoryWorkflow) {
+            $orderStats->factory_revenue = (float) OrderItem::query()
+                ->whereHas('order', fn (Builder $query) => $query->where('is_stock_order', false))
+                ->whereNotNull('factory_sale_price')
+                ->whereNotNull('factory_handover_at')
+                ->sum(DB::raw("CASE WHEN source = 'Stock' THEN factory_sale_price * stock_factory_quantity ELSE factory_sale_price * qty END"));
+        }
+
         if ($canManageSales) {
-            $orderStats->total_revenue = Order::query()
+            $financialStats = Order::query()
+                ->where('is_stock_order', false)
                 ->where('status', '!=', 'Cancel')
-                ->sum('total_order');
+                ->selectRaw('COALESCE(SUM(total_order), 0) AS total_revenue')
+                ->selectRaw('COALESCE(SUM(CASE WHEN status NOT IN (?, ?) AND paid_amount < total_order THEN total_order - paid_amount ELSE 0 END), 0) AS unpaid_amount', ['Selesai', 'Cancel'])
+                ->first();
+            $orderStats->total_revenue = (float) $financialStats->total_revenue;
+            $orderStats->unpaid_amount = (float) $financialStats->unpaid_amount;
         }
 
         $statusCountsQuery = Order::query()
+            ->when(! $factoryWorkflow, fn (Builder $query): Builder => $query->where('is_stock_order', false))
             ->when($search !== '', fn (Builder $query) => $canManageSales
                 ? $this->applySearch($query, $search)
                 : $this->applyProductionSearch($query, $search, $productionSearchItemStatuses))
@@ -244,6 +291,7 @@ class OrderController extends Controller
         $orderType = $validated['order_type'] ?? null;
         $orders = Order::query()
             ->with(['guest', 'items'])
+            ->where('is_stock_order', false)
             ->when($search !== '', fn (Builder $query) => $this->applySearch($query, $search))
             ->when($orderType !== null, fn (Builder $query) => $query->where('order_type', $orderType))
             ->orderBy('id');
@@ -343,6 +391,7 @@ class OrderController extends Controller
                     $catalogProduct = $this->createCatalogProduct($item);
                     $catalogProducts->put($catalogProduct->id, $catalogProduct);
                 }
+                $catalogProduct = Product::query()->lockForUpdate()->findOrFail($catalogProduct->id);
 
                 $imagePath = null;
 
@@ -358,35 +407,9 @@ class OrderController extends Controller
 
                 $total += $subtotal;
 
-                if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
-                    $catalogProduct->update(['price' => $item['price']]);
-                }
+                $catalogProduct->update(['price' => $item['price']]);
 
-                $statusImagePaths = [];
-                if ($catalogProduct instanceof Product && $catalogProduct->mockupPaths() !== []) {
-                    $statusImagePaths = $this->copyCatalogMockups($catalogProduct);
-                }
-                $hasCatalogMockup = $statusImagePaths !== [];
-                $initialStatus = $item['source'] === 'Stock'
-                    ? 'Distribusi'
-                    : ($hasCatalogMockup ? 'Produksi' : 'None');
-
-                $order->items()->create([
-                    'product' => $item['product'],
-                    'product_id' => $catalogProduct?->id,
-                    'sku' => $this->orderItemSku($item, $catalogProduct),
-                    'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
-                    'qty' => $item['qty'],
-                    'price' => $item['price'],
-                    'dimensions' => $item['dimensions'] ?? null,
-                    'color' => $this->catalogColor($item, $catalogProduct),
-                    'source' => $item['source'],
-                    'status' => $initialStatus,
-                    'factory_status' => 'None',
-                    'image' => $imagePath,
-                    'status_image' => $statusImagePaths[0] ?? null,
-                    'status_images' => $statusImagePaths ?: null,
-                ]);
+                $this->createOrderItemsForCatalogProduct($order, $item, $catalogProduct, $imagePath, $index);
             }
 
             $order->update([
@@ -414,6 +437,7 @@ class OrderController extends Controller
 
         $salesWorkflow = $user->isSalesWorkflow();
         $factoryWorkflow = $user->isFactoryWorkflow();
+        abort_if($order->is_stock_order && ! $factoryWorkflow, 404);
         $canAssignSubcontractors = $factoryWorkflow && $user->canAccessMenu('subcontractors');
         $canAssignPiecework = $factoryWorkflow && $user->canAccessMenu('order_products');
 
@@ -426,7 +450,10 @@ class OrderController extends Controller
                     ->orderBy('id'),
                 'items.category',
                 'items.services',
+                'items.qualityEvents',
                 'guest',
+                'items.cancellationRequests.requestedBy:id,name',
+                'items.cancellationRequests.decidedBy:id,name',
                 'items.pieceworkAssignments' => fn ($query) => $query
                     ->with('employee')
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
@@ -438,6 +465,34 @@ class OrderController extends Controller
             abort_unless($factoryWorkflow, 403);
             $hasVisibleFactoryItems = $this->applyFactoryItemVisibility($order->items()->getQuery())->exists();
             abort_unless($hasVisibleFactoryItems || $order->pending_deadline !== null, 404);
+            $factoryItemColumns = [
+                'id',
+                'order_id',
+                'product',
+                'product_id',
+                'category_id',
+                'dimensions',
+                'qty',
+                'qty_completed',
+                'factory_status',
+                'factory_sale_price',
+                'factory_handover_at',
+                'factory_drawing_image',
+                'packed_quantity',
+                'quality_good_quantity',
+                'quality_damaged_quantity',
+                'quality_short_quantity',
+                'color',
+                'source',
+                'status',
+                'image',
+                'status_image',
+                'status_images',
+                'stock_factory_quantity',
+            ];
+            if ($user->isOwner()) {
+                $factoryItemColumns[] = 'price';
+            }
             $order = Order::query()
                 ->select([
                     'id',
@@ -455,38 +510,23 @@ class OrderController extends Controller
                 ->findOrFail($order->id);
             $order->load([
                 'items' => fn ($query) => $this->applyFactoryItemVisibility($query->getQuery())
-                    ->select(
-                        'id',
-                        'order_id',
-                        'product',
-                        'category_id',
-                        'dimensions',
-                        'qty',
-                        'qty_completed',
-                        'factory_status',
-                        'factory_drawing_image',
-                        'packed_quantity',
-                        'quality_good_quantity',
-                        'quality_damaged_quantity',
-                        'quality_short_quantity',
-                        'color',
-                        'source',
-                        'status',
-                        'image',
-                        'status_image',
-                        'status_images',
-                    )
+                    ->select($factoryItemColumns)
                     ->withSum('activeSubcontractorAssignments as active_subcontracted_quantity', 'assigned_quantity')
                     ->withSum('activeSubcontractorAssignments as active_subcontractor_completed_quantity', 'qty_completed')
                     ->orderByRaw("CASE WHEN status = 'Distribusi' THEN 1 ELSE 0 END")
                     ->orderBy('id'),
                 'items.category',
+                'items.catalogProduct:id,factory_mockup,factory_sale_price',
+                'items.qualityEvents',
+                'items.cancellationRequests.requestedBy:id,name',
+                'items.cancellationRequests.decidedBy:id,name',
                 'items.services',
                 'items.pieceworkItems.employee',
                 'items.pieceworkItems.attendance.employee',
                 'items.pieceworkAssignments' => fn ($query) => $query
                     ->with('employee')
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
+                'items.finishingAssignments.employee:id,full_name',
                 'items.activeSubcontractorAssignments.subcontractor',
                 'pendingDeadlineRequestedBy:id,name',
                 'events',
@@ -504,6 +544,39 @@ class OrderController extends Controller
                 ->orderBy('full_name')
                 ->get(['id', 'full_name'])
             : collect();
+        $pieceworkAssignableItems = $canAssignPiecework && $order->status !== 'Cancel'
+            ? $order->items
+                ->map(function (OrderItem $item): array {
+                    $reservedQuantity = $item->pieceworkAssignments
+                        ->whereNull('completed_at')
+                        ->whereNull('cancelled_at')
+                        ->where('is_rework', false)
+                        ->sum(fn (PieceworkAssignment $assignment): int => max(
+                            (int) $assignment->target_quantity
+                                - (int) $assignment->completed_quantity
+                                - (int) $assignment->cancelled_quantity
+                                - (int) $assignment->produced_quantity,
+                            0,
+                        ));
+                    $availableQuantity = max($item->factory_production_qty_remaining - $reservedQuantity, 0);
+                    $stockFactoryReady = $item->source !== 'Stock'
+                        || ((int) $item->quality_unchecked_quantity === 0
+                            && (int) $item->service_quantity === 0
+                            && (int) $item->packed_quantity === 0);
+
+                    return [
+                        'item' => $item,
+                        'available_quantity' => $availableQuantity,
+                        'is_assignable' => $item->activeSubcontractorAssignments->isEmpty()
+                            && $stockFactoryReady
+                            && $item->allowsRegularProductionAssignment()
+                            && filled($item->factory_drawing_image)
+                            && $availableQuantity > 0,
+                    ];
+                })
+                ->filter(fn (array $candidate): bool => $candidate['is_assignable'])
+                ->values()
+            : collect();
 
         if ($salesWorkflow) {
             $order->load([
@@ -515,6 +588,9 @@ class OrderController extends Controller
                     ->withSum('pieceworkItems as produced_quantity', 'quantity'),
                 'items.activeSubcontractorAssignments.subcontractor',
             ]);
+            if ($user->isOwner()) {
+                $order->load('items.catalogProduct:id,factory_sale_price');
+            }
         }
 
         $this->loadOrderComments($order);
@@ -524,6 +600,12 @@ class OrderController extends Controller
             'Produksi' => $order->items->sum(fn (OrderItem $item): int => $item->production_quantity),
             'Service' => $order->items->sum(fn (OrderItem $item): int => $item->service_quantity),
         ];
+        $canRequestOrderCancellation = $salesWorkflow && $this->canRequestOrderCancellation($order);
+        $hasPendingOrderCancellation = $salesWorkflow && $this->hasPendingOrderCancellation($order);
+        $hasEmployeePieceworkAssignments = $canAssignSubcontractors
+            && $order->items()
+                ->whereHas('pieceworkAssignments', fn ($query) => $query->whereNull('cancelled_at'))
+                ->exists();
         $canReviewDeadlineChange = $factoryWorkflow && $order->pending_deadline !== null;
 
         return view('orders.show', compact(
@@ -531,10 +613,14 @@ class OrderController extends Controller
             'salesWorkflow',
             'factoryWorkflow',
             'canAssignSubcontractors',
+            'hasEmployeePieceworkAssignments',
             'canAssignPiecework',
             'productStatusCounts',
+            'canRequestOrderCancellation',
+            'hasPendingOrderCancellation',
             'canReviewDeadlineChange',
             'factoryEmployees',
+            'pieceworkAssignableItems',
             'subcontractors',
         ));
     }
@@ -676,9 +762,19 @@ class OrderController extends Controller
 
     public function edit(Order $order)
     {
-        $order->load(['items.category', 'items.catalogProduct', 'guest']);
+        abort_if($order->is_stock_order, 404);
+        $order->load([
+            'items.category',
+            'items.catalogProduct',
+            'items.cancellationRequests',
+            'items.qualityEvents',
+            'guest',
+        ]);
         $order->synchronizeProductionStatusFromItems($order->items);
         $this->loadOrderComments($order);
+        $salesWorkflow = request()->user()->isSalesWorkflow();
+        $canRequestOrderCancellation = $salesWorkflow && $this->canRequestOrderCancellation($order);
+        $hasPendingOrderCancellation = $salesWorkflow && $this->hasPendingOrderCancellation($order);
         $hasProductionWorkItems = $order->items->contains(
             fn (OrderItem $item): bool => in_array('Produksi', [$item->status, $item->factory_status], true),
         );
@@ -699,17 +795,22 @@ class OrderController extends Controller
             'productOptions',
             'catalogProducts',
             'hasProductionWorkItems',
+            'salesWorkflow',
+            'canRequestOrderCancellation',
+            'hasPendingOrderCancellation',
         ));
     }
 
     public function update(Request $request, Order $order)
     {
+        abort_if($order->is_stock_order, 404);
         $request->merge(['paid_amount' => $order->paid_amount]);
         $validated = $this->validateOrder($request, $order);
         $validated['paid_amount'] = $this->validatedPaidAmount($validated, $order);
         $catalogProducts = $this->catalogProductsForItems($validated['items']);
+        $factoryDrawingPathsToDelete = [];
 
-        DB::transaction(function () use ($request, $validated, $order, $catalogProducts) {
+        DB::transaction(function () use ($request, $validated, $order, $catalogProducts, &$factoryDrawingPathsToDelete) {
             $order = Order::query()->lockForUpdate()->findOrFail($order->id);
             $guest = $this->resolveGuest($validated);
             $guest->update(['guest_source' => $validated['guest_source']]);
@@ -761,7 +862,7 @@ class OrderController extends Controller
                 ]);
             }
 
-            $lockedStatuses = ['Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Dalam Perjalanan', 'Packing', 'Ready'];
+            $lockedStatuses = ['Produksi', 'Proses Kirim', 'Distribusi', 'Dalam Perjalanan', 'Service', 'Finishing', 'Packing', 'Ready'];
             foreach ($validated['items'] as $index => $submittedItem) {
                 if (blank($submittedItem['id'] ?? null)) {
                     continue;
@@ -885,6 +986,7 @@ class OrderController extends Controller
                     $catalogProduct = $this->createCatalogProduct($item);
                     $catalogProducts->put($catalogProduct->id, $catalogProduct);
                 }
+                $catalogProduct = Product::query()->lockForUpdate()->findOrFail($catalogProduct->id);
 
                 $subtotal = $item['qty'] * $item['price'];
 
@@ -954,6 +1056,9 @@ class OrderController extends Controller
 
                     $imagePath = $orderItem->image;
                     $catalogProductChanged = (int) ($orderItem->product_id ?? 0) !== (int) ($catalogProduct?->id ?? 0);
+                    $factoryDrawingPath = $orderItem->factory_drawing_image;
+                    $factorySalePrice = $orderItem->factory_sale_price;
+                    $factoryStatus = $orderItem->factory_status;
 
                     if ($request->hasFile("items.$index.image")) {
 
@@ -982,6 +1087,16 @@ class OrderController extends Controller
                     } elseif ($catalogProductChanged) {
                         $this->deleteStatusImages($statusImagePaths);
                         $statusImagePaths = [];
+                    }
+                    if ($catalogProductChanged) {
+                        if ($factoryDrawingPath !== null) {
+                            $factoryDrawingPathsToDelete[] = $factoryDrawingPath;
+                        }
+
+                        $factoryData = $this->factoryCatalogData($catalogProduct, $item['source']);
+                        $factoryDrawingPath = $factoryData['factory_drawing_image'];
+                        $factorySalePrice = $factoryData['factory_sale_price'];
+                        $factoryStatus = $factoryData['factory_status'];
                     }
                     if (
                         $statusImagePaths === []
@@ -1033,15 +1148,19 @@ class OrderController extends Controller
                         'status' => $hasActiveSubcontractorAssignments ? $orderItem->status : $itemStatus,
                         'factory_status' => $hasActiveSubcontractorAssignments
                             ? ($itemStatus === 'Ready' ? 'Ready' : $orderItem->factory_status)
-                            : ($item['source'] === 'Stock' && $itemStatus === 'Distribusi'
+                            : ($catalogProductChanged
+                                ? $factoryStatus
+                                : ($item['source'] === 'Stock' && $itemStatus === 'Distribusi'
                                 ? 'None'
                                 : ($itemStatus === 'Produksi' && blank($orderItem->factory_drawing_image)
                                     ? 'None'
-                                    : $itemStatus)),
+                                    : $itemStatus))),
                         'qty_completed' => $completedQuantity,
                         'image' => $imagePath,
                         'status_image' => $statusImagePath,
                         'status_images' => $statusImagePaths ?: null,
+                        'factory_drawing_image' => $factoryDrawingPath,
+                        'factory_sale_price' => $factorySalePrice,
                     ]);
                     if ($hasActiveSubcontractorAssignments && $item['status'] === 'Ready') {
                         $orderItem->update(['status' => 'Ready']);
@@ -1049,9 +1168,7 @@ class OrderController extends Controller
                         $orderItem->synchronizeStatusFromWorkAllocations();
                     }
 
-                    if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
-                        $catalogProduct->update(['price' => $item['price']]);
-                    }
+                    $catalogProduct->update(['price' => $item['price']]);
 
                     if ($previousItem && $previousItem->status !== $orderItem->status) {
                         $this->recordOrderEvent(
@@ -1087,44 +1204,27 @@ class OrderController extends Controller
                         $imagePath = $this->copyCatalogImage($catalogProduct);
                     }
 
-                    if ($catalogProduct !== null && (float) $item['price'] < (float) $catalogProduct->price) {
-                        $catalogProduct->update(['price' => $item['price']]);
-                    }
-                    $statusImagePaths = [];
-                    if ($catalogProduct instanceof Product && $catalogProduct->mockupPaths() !== []) {
-                        $statusImagePaths = $this->copyCatalogMockups($catalogProduct);
-                    }
-                    $hasCatalogMockup = $statusImagePaths !== [];
-                    $initialStatus = $item['source'] === 'Stock'
-                        ? 'Distribusi'
-                        : ($hasCatalogMockup ? 'Produksi' : 'None');
-                    $hasNewFactoryWorkItems = $hasNewFactoryWorkItems || $item['source'] !== 'Stock';
-                    $newItem = $order->items()->create([
-                        'product' => $item['product'],
-                        'product_id' => $catalogProduct?->id,
-                        'sku' => $this->orderItemSku($item, $catalogProduct),
-                        'category_id' => $item['category_id'] ?? $catalogProduct?->category_id,
-                        'qty' => $item['qty'],
-                        'price' => $item['price'],
-                        'dimensions' => $item['dimensions'] ?? null,
-                        'color' => $this->catalogColor($item, $catalogProduct),
-                        'source' => $item['source'],
-                        'status' => $initialStatus,
-                        'factory_status' => 'None',
-                        'image' => $imagePath,
-                        'status_image' => $statusImagePaths[0] ?? null,
-                        'status_images' => $statusImagePaths ?: null,
-                    ]);
-
-                    $this->recordOrderEvent(
+                    $createdItems = $this->createOrderItemsForCatalogProduct(
                         $order,
-                        'item_added',
-                        'Produk ditambahkan',
-                        "{$order->order_id} - {$newItem->product} (status awal: {$initialStatus})",
-                        $newItem->id,
+                        $item,
+                        $catalogProduct,
+                        $imagePath,
+                        $index,
                     );
+                    $hasNewFactoryWorkItems = $hasNewFactoryWorkItems
+                        || collect($createdItems)->contains(fn (OrderItem $createdItem): bool => $createdItem->source !== 'Stock');
 
-                    $existingItemIds[] = $newItem->id;
+                    foreach ($createdItems as $newItem) {
+                        $this->recordOrderEvent(
+                            $order,
+                            'item_added',
+                            'Produk ditambahkan',
+                            "{$order->order_id} - {$newItem->product} (status awal: {$newItem->status})",
+                            $newItem->id,
+                        );
+
+                        $existingItemIds[] = $newItem->id;
+                    }
                 }
             }
 
@@ -1138,6 +1238,9 @@ class OrderController extends Controller
                     Storage::disk('public')->delete($item->image);
                 }
                 $this->deleteStatusImages($item->status_evidence_images);
+                if ($item->factory_drawing_image !== null) {
+                    $factoryDrawingPathsToDelete[] = $item->factory_drawing_image;
+                }
 
                 $item->delete();
             }
@@ -1162,6 +1265,10 @@ class OrderController extends Controller
                 $order->synchronizeProductionStatusFromItems();
             }
         });
+
+        foreach (array_unique($factoryDrawingPathsToDelete) as $factoryDrawingPath) {
+            Storage::disk('public')->delete($factoryDrawingPath);
+        }
 
         return redirect()
             ->route('orders.index')
@@ -1492,6 +1599,12 @@ class OrderController extends Controller
             $existingItem = $existingItems->get((int) ($item['id'] ?? 0));
 
             if (in_array($source, ['Stock', 'Order'], true)) {
+                if ($existingItem instanceof OrderItem && $source !== $existingItem->source) {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.source" => 'Sumber produk ditentukan otomatis saat produk ditambahkan ke order.',
+                    ]);
+                }
+
                 $submittedStatus = $item['status'] ?? 'None';
                 $unchangedStockStatus = $existingItem?->source === 'Stock'
                     && $existingItem->status === $submittedStatus;
@@ -1721,12 +1834,12 @@ class OrderController extends Controller
     }
 
     /**
-     * @return list<array{id: int, name: string, sku: string|null, category_id: int|null, category_name: string|null, price: float, dimensions: string|null, colors: list<string>, mockup_urls: list<string>}>
+     * @return list<array{id: int, name: string, sku: string|null, category_id: int|null, category_name: string|null, price: float, has_factory_sale_price: bool, stock_bali_quantity: int, stock_factory_quantity: int, dimensions: string|null, colors: list<string>, mockup_urls: list<string>}>
      */
     private function catalogProductOptions(): array
     {
         return Product::query()
-            ->with('category:id,name')
+            ->with(['category:id,name', 'stockBalances'])
             ->orderBy('name')
             ->orderBy('id')
             ->get()
@@ -1737,6 +1850,9 @@ class OrderController extends Controller
                 'category_id' => $product->category_id,
                 'category_name' => $product->category?->name,
                 'price' => (float) $product->price,
+                'has_factory_sale_price' => $product->factory_sale_price !== null,
+                'stock_bali_quantity' => (int) ($product->stockBalances->firstWhere('business_unit', User::UNIT_BALI)?->quantity ?? 0),
+                'stock_factory_quantity' => (int) ($product->stockBalances->firstWhere('business_unit', User::UNIT_FACTORY)?->quantity ?? 0),
                 'dimensions' => $product->dimensions,
                 'colors' => array_values(array_filter($product->colors ?? [], 'is_string')),
                 'mockup_urls' => array_map(
@@ -1947,6 +2063,158 @@ class OrderController extends Controller
         return $mockupPaths;
     }
 
+    /**
+     * @return array{factory_drawing_image: ?string, factory_sale_price: ?string, factory_status: string}
+     */
+    private function factoryCatalogData(?Product $product, string $source, bool $hasPbMockup = false): array
+    {
+        $factoryDrawingPath = $product instanceof Product && filled($product->factory_mockup)
+            ? $this->copyCatalogAsset(
+                $product->factory_mockup,
+                'Mockup PF katalog tidak ditemukan di penyimpanan.',
+                'Mockup PF katalog gagal disalin ke order.',
+            )
+            : null;
+        $factorySalePrice = $product?->factory_sale_price;
+        $factoryStatus = $source === 'Stock'
+            ? 'None'
+            : ($hasPbMockup && filled($factoryDrawingPath) && $factorySalePrice !== null
+                ? 'Siap Produksi'
+                : 'None');
+
+        return [
+            'factory_drawing_image' => $factoryDrawingPath,
+            'factory_sale_price' => $factorySalePrice,
+            'factory_status' => $factoryStatus,
+        ];
+    }
+
+    /**
+     * @return array{bali: int, factory: int, quantity: int}|null
+     */
+    private function reserveProductStock(Product $product, int $quantity, int|string $index): ?array
+    {
+        $balances = ProductStock::query()
+            ->where('product_id', $product->id)
+            ->whereIn('business_unit', [User::UNIT_BALI, User::UNIT_FACTORY])
+            ->orderBy('business_unit')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('business_unit');
+        $baliAvailable = (int) ($balances->get(User::UNIT_BALI)?->quantity ?? 0);
+        $factoryAvailable = (int) ($balances->get(User::UNIT_FACTORY)?->quantity ?? 0);
+
+        $stockQuantity = min($baliAvailable + $factoryAvailable, $quantity);
+
+        if ($stockQuantity === 0) {
+            return null;
+        }
+
+        if ($product->factory_sale_price === null) {
+            throw ValidationException::withMessages([
+                "items.{$index}.product" => 'Harga PF katalog wajib diisi sebelum produk stok dapat digunakan.',
+            ]);
+        }
+
+        $baliQuantity = min($baliAvailable, $stockQuantity);
+        $factoryQuantity = $stockQuantity - $baliQuantity;
+
+        if ($baliQuantity > 0) {
+            $balances->get(User::UNIT_BALI)->decrement('quantity', $baliQuantity);
+        }
+        if ($factoryQuantity > 0) {
+            $balances->get(User::UNIT_FACTORY)->decrement('quantity', $factoryQuantity);
+        }
+
+        return [
+            'bali' => $baliQuantity,
+            'factory' => $factoryQuantity,
+            'quantity' => $stockQuantity,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @return list<OrderItem>
+     */
+    private function createOrderItemsForCatalogProduct(
+        Order $order,
+        array $item,
+        Product $catalogProduct,
+        ?string $imagePath,
+        int|string $index,
+    ): array {
+        $stockAllocation = $this->reserveProductStock($catalogProduct, (int) $item['qty'], $index);
+        $stockQuantity = (int) ($stockAllocation['quantity'] ?? 0);
+        $productionQuantity = (int) $item['qty'] - $stockQuantity;
+        $statusImagePaths = $catalogProduct->mockupPaths() !== []
+            ? $this->copyCatalogMockups($catalogProduct)
+            : [];
+        $baseAttributes = [
+            'product' => $item['product'],
+            'product_id' => $catalogProduct->id,
+            'sku' => $this->orderItemSku($item, $catalogProduct),
+            'category_id' => $item['category_id'] ?? $catalogProduct->category_id,
+            'price' => $item['price'],
+            'dimensions' => $item['dimensions'] ?? null,
+            'color' => $this->catalogColor($item, $catalogProduct),
+            'image' => $imagePath,
+            'status_image' => $statusImagePaths[0] ?? null,
+            'status_images' => $statusImagePaths ?: null,
+        ];
+        $createdItems = [];
+
+        if ($stockQuantity > 0) {
+            $factoryData = $this->factoryCatalogData($catalogProduct, 'Stock');
+            $createdItems[] = $order->items()->create(array_merge($baseAttributes, [
+                'qty' => $stockQuantity,
+                'source' => 'Stock',
+                'status' => 'Distribusi',
+                'factory_status' => $factoryData['factory_status'],
+                'factory_drawing_image' => $factoryData['factory_drawing_image'],
+                'factory_sale_price' => $factoryData['factory_sale_price'],
+                'factory_handover_at' => now(),
+                'stock_business_unit' => $this->stockLocation($stockAllocation),
+                'stock_bali_quantity' => $stockAllocation['bali'],
+                'stock_factory_quantity' => $stockAllocation['factory'],
+            ]));
+        }
+
+        if ($productionQuantity > 0) {
+            $factoryData = $this->factoryCatalogData($catalogProduct, 'Order', $statusImagePaths !== []);
+            $createdItems[] = $order->items()->create(array_merge($baseAttributes, [
+                'qty' => $productionQuantity,
+                'source' => 'Order',
+                'status' => $statusImagePaths !== [] ? 'Produksi' : 'None',
+                'factory_status' => $factoryData['factory_status'],
+                'factory_drawing_image' => $factoryData['factory_drawing_image'],
+                'factory_sale_price' => $factoryData['factory_sale_price'],
+                'factory_handover_at' => null,
+                'stock_business_unit' => null,
+                'stock_bali_quantity' => 0,
+                'stock_factory_quantity' => 0,
+            ]));
+        }
+
+        return $createdItems;
+    }
+
+    /**
+     * @param  array{bali: int, factory: int}|null  $stockAllocation
+     */
+    private function stockLocation(?array $stockAllocation): ?string
+    {
+        if ($stockAllocation === null) {
+            return null;
+        }
+
+        if ($stockAllocation['bali'] > 0 && $stockAllocation['factory'] > 0) {
+            return 'mixed';
+        }
+
+        return $stockAllocation['factory'] > 0 ? User::UNIT_FACTORY : User::UNIT_BALI;
+    }
+
     private function copyCatalogAsset(?string $catalogAssetPath, string $missingMessage, string $copyErrorMessage): ?string
     {
         if ($catalogAssetPath === null) {
@@ -2033,6 +2301,25 @@ class OrderController extends Controller
         });
     }
 
+    private function canRequestOrderCancellation(Order $order): bool
+    {
+        return $order->status !== 'Cancel'
+            && $order->items->contains(function (OrderItem $item): bool {
+                $pendingQuantity = $item->cancellationRequests
+                    ->where('decision', 'pending')
+                    ->sum('quantity');
+
+                return (int) $item->qty > $pendingQuantity;
+            });
+    }
+
+    private function hasPendingOrderCancellation(Order $order): bool
+    {
+        return $order->items->contains(fn (OrderItem $item): bool => $item->cancellationRequests
+            ->where('decision', 'pending')
+            ->isNotEmpty());
+    }
+
     private function applyFactoryItemVisibility(Builder $query): Builder
     {
         return $query->where(function (Builder $query): void {
@@ -2069,7 +2356,9 @@ class OrderController extends Controller
         OrderCommentRecipient::query()
             ->where('user_id', auth()->id())
             ->whereNull('read_at')
-            ->whereHas('comment', fn (Builder $query) => $query->where('order_id', $order->id))
+            ->whereHas('comment', fn (Builder $query) => $query
+                ->where('order_id', $order->id)
+                ->whereNull('retracted_at'))
             ->update([
                 'read_at' => now(),
                 'updated_at' => now(),
@@ -2078,10 +2367,10 @@ class OrderController extends Controller
         $order->load([
             'comments' => fn ($query) => $query
                 ->whereNull('parent_id')
-                ->with('author')
+                ->with(['author', 'retractedBy'])
                 ->withCount(['readRecipients', 'replies']),
             'comments.replies' => fn ($query) => $query
-                ->with('author')
+                ->with(['author', 'retractedBy'])
                 ->withCount('readRecipients'),
         ]);
     }

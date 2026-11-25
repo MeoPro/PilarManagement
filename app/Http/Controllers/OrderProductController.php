@@ -6,21 +6,25 @@ use App\Models\Employee;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderItemService;
+use App\Models\Product;
 use App\Models\Subcontractor;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use RuntimeException;
 
 class OrderProductController extends Controller
 {
-    private const PRODUCT_STATUSES = ['None', 'Produksi', 'Proses Kirim', 'Distribusi', 'Dalam Perjalanan', 'Finishing', 'Packing', 'Ready'];
+    private const PRODUCT_STATUSES = ['None', 'Produksi', 'Proses Kirim', 'Distribusi', 'Dalam Perjalanan', 'Service', 'Finishing', 'Packing', 'Ready'];
 
     public function index(Request $request): View
     {
@@ -46,6 +50,7 @@ class OrderProductController extends Controller
         $itemsQuery = OrderItem::query()
             ->with([
                 'category:id,name',
+                'catalogProduct:id,name,factory_mockup,factory_sale_price',
                 'services' => fn ($query) => $query
                     ->where('status', 'Service')
                     ->orderBy('id'),
@@ -62,13 +67,17 @@ class OrderProductController extends Controller
                         $activeQuery->whereIn('factory_status', array_diff($statuses, ['None']))
                             ->whereNotNull('factory_drawing_image')
                             ->where('factory_drawing_image', '!=', '');
-                    })->orWhere(function (Builder $pendingQuery): void {
-                        $this->applyFactoryDrawingPendingFilter($pendingQuery);
-                    });
+                    })->orWhere('factory_status', 'Distribusi')
+                        ->orWhere(function (Builder $pendingQuery): void {
+                            $this->applyFactoryDrawingPendingFilter($pendingQuery);
+                        });
                 })
-                    ->whereRaw(
-                        'order_items.qty > COALESCE((SELECT SUM(subcontractor_assignments.assigned_quantity) FROM subcontractor_assignments WHERE subcontractor_assignments.order_item_id = order_items.id AND subcontractor_assignments.cancelled_at IS NULL), 0)',
-                    ),
+                    ->where(function (Builder $query): void {
+                        $query->where('factory_status', 'Distribusi')
+                            ->orWhereRaw(
+                                'order_items.qty > COALESCE((SELECT SUM(subcontractor_assignments.assigned_quantity) FROM subcontractor_assignments WHERE subcontractor_assignments.order_item_id = order_items.id AND subcontractor_assignments.cancelled_at IS NULL), 0)',
+                            );
+                    }),
                 fn (Builder $query) => $query->where(function (Builder $queueQuery) use ($statuses): void {
                     $queueQuery->whereIn('status', $statuses)
                         ->orWhereHas('services', fn (Builder $serviceQuery) => $serviceQuery->where('status', 'Service'))
@@ -156,7 +165,6 @@ class OrderProductController extends Controller
     public function update(Request $request, OrderItem $orderItem): RedirectResponse
     {
         $user = $request->user();
-        abort_if($user->isFactoryWorkflow(), 403);
         abort_if($orderItem->source === 'Stock', 403);
         $queueStatuses = $this->queueStatusesFor($user);
         $factoryWorkflow = $user->isFactoryWorkflow();
@@ -172,10 +180,9 @@ class OrderProductController extends Controller
                 Rule::in($this->editableStatusesFor($user)),
             ],
             "items.{$orderItem->id}.qty_completed" => [
-                'required',
-                'integer',
-                'min:0',
-                'max:'.$maximumQuantity,
+                ...($factoryWorkflow
+                    ? ['required', 'integer', 'min:0', 'max:'.$maximumQuantity]
+                    : ['sometimes', 'integer', 'min:0', 'max:'.$maximumQuantity]),
             ],
             "items.{$orderItem->id}.comment" => [
                 $queuedStatus === 'Distribusi'
@@ -220,7 +227,21 @@ class OrderProductController extends Controller
                 ]);
             }
 
-            $completed = (int) $itemInput['qty_completed'];
+            $submittedCompleted = $itemInput['qty_completed'] ?? null;
+            $completed = $factoryWorkflow
+                ? (int) $submittedCompleted
+                : (int) $item->qty_completed;
+
+            if (
+                ! $factoryWorkflow
+                && array_key_exists('qty_completed', $itemInput)
+                && (int) $submittedCompleted !== $completed
+            ) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.qty_completed" => 'Progres produksi hanya dapat diubah oleh Pilar Factory.',
+                ]);
+            }
+
             $maximumQuantity = $factoryWorkflow ? $item->factory_quantity : (int) $item->qty;
             if ($completed > $maximumQuantity) {
                 throw ValidationException::withMessages([
@@ -236,6 +257,16 @@ class OrderProductController extends Controller
             $reworkComment = trim((string) ($itemInput['comment'] ?? ''));
             $isReturningToProduction = $previousStatus === 'Distribusi' && $status === 'Produksi';
 
+            if (
+                $factoryWorkflow
+                && $previousStatus === 'Service'
+                && ($status !== 'Service' || $completed !== $previousCompleted)
+            ) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.status" => 'Pekerjaan Service hanya dapat diselesaikan melalui penugasan karyawan Harian.',
+                ]);
+            }
+
             if ($isReturningToProduction) {
                 if ($reworkComment === '') {
                     throw ValidationException::withMessages([
@@ -244,6 +275,26 @@ class OrderProductController extends Controller
                 }
 
                 $completed = 0;
+            }
+
+            if (
+                $factoryWorkflow
+                && $status === 'Siap Produksi'
+                && ! $this->hasRequiredFactoryProductionData($item)
+            ) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.status" => 'Status Siap Produksi memerlukan gambar kerja PF dan harga jual ke PB.',
+                ]);
+            }
+
+            if (
+                $factoryWorkflow
+                && $status === 'Produksi'
+                && ! $this->hasRequiredFactoryProductionData($item)
+            ) {
+                throw ValidationException::withMessages([
+                    "items.{$item->id}.status" => 'Status Produksi memerlukan gambar kerja PF dan harga jual ke PB.',
+                ]);
             }
 
             if ($factoryWorkflow && ! $isReturningToProduction) {
@@ -278,6 +329,8 @@ class OrderProductController extends Controller
             }
 
             if (
+                ! $factoryWorkflow
+                &&
                 in_array($status, OrderItem::STATUSES_REQUIRING_PHOTO, true)
                 && $status !== $previousStatus
                 && $statusPhotos === []
@@ -331,6 +384,9 @@ class OrderProductController extends Controller
                 'status_images' => $statusImagePaths ?: null,
                 'factory_handover_at' => $recordsFactoryHandover ? now() : $item->factory_handover_at,
             ]);
+            if ($factoryWorkflow && $order->is_stock_order) {
+                $item->refresh()->addInternalStockOutput($request->user());
+            }
             if ($factoryWorkflow) {
                 $item->synchronizeStatusFromWorkAllocations();
             } elseif (! $item->activeSubcontractorAssignments()->exists()) {
@@ -343,9 +399,7 @@ class OrderProductController extends Controller
             if ($previousStatus !== $currentWorkflowStatus) {
                 $order->events()->create([
                     'order_item_id' => $item->id,
-                    'type' => $factoryWorkflow && $previousOverallStatus !== $item->status
-                        ? 'item_factory_status_changed'
-                        : 'item_status_changed',
+                    'type' => $factoryWorkflow ? 'item_factory_status_changed' : 'item_status_changed',
                     'title' => 'Status produk berubah',
                     'description' => "{$order->order_id} - {$item->product}: {$previousStatus} -> {$currentWorkflowStatus}",
                     'occurred_at' => now(),
@@ -388,59 +442,154 @@ class OrderProductController extends Controller
         return back()->with('success', 'Status dan progres produk berhasil diperbarui.');
     }
 
-    public function updateFactoryDrawing(Request $request, OrderItem $orderItem): RedirectResponse
+    public function updateFactoryDrawing(Request $request, OrderItem $orderItem): JsonResponse|RedirectResponse
     {
         $user = $request->user();
         abort_unless($user->isFactoryWorkflow() && $user->canAccessMenu('order_products'), 403);
         $this->normalizeMoney($request, 'factory_sale_price');
         $validated = $request->validate([
-            'factory_drawing_image' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
-            'factory_sale_price' => $orderItem->source === 'Stock'
-                ? ['nullable', 'numeric', 'min:0']
-                : ['required', 'numeric', 'min:0'],
+            'factory_drawing_image' => [
+                'nullable',
+                'image',
+                'mimes:jpg,jpeg,png,webp',
+                'max:5120',
+            ],
+            'factory_sale_price' => ['nullable', 'numeric', 'min:0'],
         ]);
+        $uploadedDrawing = $validated['factory_drawing_image'] ?? null;
         $previousPath = null;
         $newPath = null;
+        $previousCatalogMockupPath = null;
+        $newCatalogMockupPath = null;
+        $reusedCatalogMockup = false;
+        $hasSalePriceInput = isset($validated['factory_sale_price']);
 
-        DB::transaction(function () use ($validated, $orderItem, &$previousPath, &$newPath): void {
+        DB::transaction(function () use (
+            $validated,
+            $orderItem,
+            $uploadedDrawing,
+            $hasSalePriceInput,
+            &$previousPath,
+            &$newPath,
+            &$previousCatalogMockupPath,
+            &$newCatalogMockupPath,
+            &$reusedCatalogMockup,
+        ): void {
             $order = Order::query()->lockForUpdate()->findOrFail($orderItem->order_id);
             $item = OrderItem::query()->lockForUpdate()->findOrFail($orderItem->id);
 
-            $isWaitingForFactoryDrawing = $item->source === 'Stock'
+            $isWaitingForFactoryStart = $item->source === 'Stock'
                 ? (int) $item->quality_damaged_quantity > 0
                     && in_array($item->status, ['Distribusi', 'Produksi'], true)
-                    && blank($item->factory_drawing_image)
-                : $item->status === 'Produksi' && blank($item->factory_drawing_image);
+                    && in_array($item->factory_status, ['None', 'Siap Produksi'], true)
+                : $item->status === 'Produksi'
+                    && in_array($item->factory_status, ['None', 'Siap Produksi'], true);
 
-            $isExistingFactoryProduction = $item->factory_status === 'Produksi'
+            $isExistingFactoryProduction = in_array($item->factory_status, ['Produksi', 'Siap Produksi'], true)
                 && ($item->status === 'Produksi'
                     || ($item->source === 'Stock'
                         && (int) $item->quality_damaged_quantity > 0
                         && in_array($item->status, ['Distribusi', 'Produksi'], true)));
+            $isExistingFactoryWork = $item->source !== 'Stock'
+                && $item->factory_handover_at === null
+                && in_array($item->factory_status, ['Finishing', 'Packing', 'Proses Kirim'], true)
+                && in_array($item->status, ['Produksi', 'Finishing', 'Packing', 'Proses Kirim', 'Dalam Perjalanan'], true);
+            $isReturnedFactoryService = $item->status === 'Service'
+                && $item->factory_status === 'Service'
+                && $item->source !== 'Stock';
+            $isFactoryService = $item->factory_status === 'Service'
+                && (int) $item->quality_damaged_quantity > 0;
+            $isStockCatalogUpdate = $item->source === 'Stock';
 
-            if ($order->status === 'Cancel' || (! $isWaitingForFactoryDrawing && ! $isExistingFactoryProduction)) {
+            if (
+                $order->status === 'Cancel'
+                || (! $isWaitingForFactoryStart
+                    && ! $isExistingFactoryProduction
+                    && ! $isExistingFactoryWork
+                    && ! $isReturnedFactoryService
+                    && ! $isFactoryService
+                    && ! $isStockCatalogUpdate)
+            ) {
                 throw ValidationException::withMessages([
-                    'factory_drawing_image' => 'Gambar kerja hanya dapat diunggah setelah produk masuk antrean Produksi PF, termasuk Stock rusak.',
+                    'factory_drawing_image' => 'Data PF hanya dapat diperbarui setelah produk masuk antrean Produksi PF atau Service yang kembali dari PB.',
                 ]);
             }
 
+            $catalogProduct = $item->catalogProduct()->lockForUpdate()->first();
             $previousPath = $item->factory_drawing_image;
-            $newPath = $validated['factory_drawing_image']->store('orders/factory-drawings', 'public');
+            $catalogSalePrice = $catalogProduct?->factory_sale_price;
+
+            if (
+                $uploadedDrawing === null
+                && ! $hasSalePriceInput
+                && blank($previousPath)
+                && blank($catalogProduct?->factory_mockup)
+            ) {
+                throw ValidationException::withMessages([
+                    'factory_sale_price' => 'Unggah gambar kerja atau isi harga jual ke PB.',
+                ]);
+            }
+
+            if ($uploadedDrawing !== null) {
+                $newPath = $uploadedDrawing->store('orders/factory-drawings', 'public');
+                if (! is_string($newPath)) {
+                    throw new RuntimeException('Gambar kerja Pilar Factory gagal disimpan.');
+                }
+
+                if ($catalogProduct instanceof Product) {
+                    $previousCatalogMockupPath = $catalogProduct->factory_mockup;
+                    $newCatalogMockupPath = $this->copyFactoryMockupToCatalog($newPath);
+                    $catalogProduct->update(['factory_mockup' => $newCatalogMockupPath]);
+                }
+            } elseif (blank($previousPath) && filled($catalogProduct?->factory_mockup)) {
+                $newPath = $this->copyCatalogFactoryMockupToOrder($catalogProduct->factory_mockup);
+                $reusedCatalogMockup = true;
+            } elseif (filled($previousPath)) {
+                $newPath = $previousPath;
+            } elseif ($isFactoryService) {
+                $newPath = null;
+            } elseif ($isStockCatalogUpdate) {
+                $newPath = $previousPath;
+            } elseif ($isWaitingForFactoryStart && $item->source !== 'Stock') {
+                $newPath = null;
+            } else {
+                throw ValidationException::withMessages([
+                    'factory_drawing_image' => 'Unggah gambar kerja atau pastikan mockup PF tersedia di katalog produk.',
+                ]);
+            }
+
+            if ($catalogProduct instanceof Product && $hasSalePriceInput) {
+                $catalogProduct->update(['factory_sale_price' => $validated['factory_sale_price']]);
+            }
+
+            $nextSalePrice = $validated['factory_sale_price'] ?? $item->factory_sale_price ?? $catalogSalePrice;
+            $hasRequiredFactoryData = filled($newPath)
+                && ($item->source === 'Stock' || $nextSalePrice !== null);
             $updates = [
+                'factory_status' => $isWaitingForFactoryStart && $hasRequiredFactoryData
+                    ? 'Siap Produksi'
+                    : $item->factory_status,
                 'factory_drawing_image' => $newPath,
-                'factory_status' => $isWaitingForFactoryDrawing ? 'Produksi' : $item->factory_status,
             ];
-            if ($item->source !== 'Stock') {
-                $updates['factory_sale_price'] = $validated['factory_sale_price'];
+            if ($hasSalePriceInput || $item->factory_sale_price === null) {
+                $updates['factory_sale_price'] = $nextSalePrice;
             }
             $item->update($updates);
-            $order->events()->create([
-                'order_item_id' => $item->id,
-                'type' => 'factory_drawing_uploaded',
-                'title' => 'Gambar kerja Pilar Factory diperbarui',
-                'description' => "{$order->order_id} - {$item->product}",
-                'occurred_at' => now(),
-            ]);
+            if ($uploadedDrawing !== null || $reusedCatalogMockup || $hasSalePriceInput) {
+                $order->events()->create([
+                    'order_item_id' => $item->id,
+                    'type' => $uploadedDrawing !== null || $reusedCatalogMockup
+                        ? 'factory_drawing_uploaded'
+                        : 'factory_sale_price_updated',
+                    'title' => $uploadedDrawing !== null
+                        ? 'Gambar kerja Pilar Factory diperbarui'
+                        : ($reusedCatalogMockup
+                            ? 'Mockup PF katalog digunakan'
+                            : 'Harga jual Pilar Factory diperbarui'),
+                    'description' => "{$order->order_id} - {$item->product}".($reusedCatalogMockup ? ' (mockup PF katalog digunakan)' : ''),
+                    'occurred_at' => now(),
+                ]);
+            }
             $order->synchronizeProductionStatusFromItems();
         });
 
@@ -448,7 +597,267 @@ class OrderProductController extends Controller
             Storage::disk('public')->delete($previousPath);
         }
 
-        return back()->with('success', 'Gambar kerja Pilar Factory berhasil diperbarui.');
+        if ($previousCatalogMockupPath !== null && $previousCatalogMockupPath !== $newCatalogMockupPath) {
+            Storage::disk('public')->delete($previousCatalogMockupPath);
+        }
+
+        $updatedItem = $orderItem->fresh();
+        if (
+            $updatedItem->source !== 'Stock'
+            && $updatedItem->factory_status === 'None'
+        ) {
+            $successMessage = 'Perubahan PF tersimpan. Status tetap New sampai gambar kerja dan harga jual ke PB sama-sama tersedia.';
+        } elseif ($uploadedDrawing !== null) {
+            $successMessage = 'Gambar kerja Pilar Factory berhasil diperbarui dan disimpan ke katalog produk.';
+        } elseif ($hasSalePriceInput) {
+            $successMessage = $reusedCatalogMockup
+                ? 'Mockup PF dari katalog digunakan dan harga jual berhasil diperbarui.'
+                : 'Harga jual Pilar Factory berhasil diperbarui.';
+        } else {
+            $successMessage = 'Gambar kerja yang sudah ada tetap digunakan.';
+        }
+
+        if ($request->expectsJson()) {
+            return response()->json($this->factoryItemResponseData($updatedItem, $successMessage));
+        }
+
+        return back()->with('success', $successMessage);
+    }
+
+    public function destroyImage(
+        Request $request,
+        OrderItem $orderItem,
+        string $imageRole,
+        int $imageIndex,
+    ): JsonResponse|RedirectResponse {
+        $user = $request->user();
+        if ($imageRole === 'pb') {
+            abort_unless($user->isSalesWorkflow() && $user->canAccessMenu('orders'), 403);
+        } else {
+            abort_unless($imageRole === 'pf'
+                && $user->isFactoryWorkflow()
+                && $user->canAccessMenu('order_products'), 403);
+        }
+
+        $pathsToDelete = [];
+        DB::transaction(function () use ($orderItem, $imageRole, $imageIndex, &$pathsToDelete): void {
+            $order = Order::query()->lockForUpdate()->findOrFail($orderItem->order_id);
+            $item = OrderItem::query()->lockForUpdate()->findOrFail($orderItem->id);
+
+            if ($order->status === 'Cancel') {
+                throw ValidationException::withMessages([
+                    'image' => 'Foto pada order yang dibatalkan tidak dapat dihapus.',
+                ]);
+            }
+
+            $catalogProduct = $item->catalogProduct()->lockForUpdate()->first();
+            if ($imageRole === 'pb') {
+                $images = $item->status_evidence_images;
+                if (! array_key_exists($imageIndex, $images)) {
+                    throw ValidationException::withMessages([
+                        'image' => 'Foto PB tidak ditemukan. Muat ulang halaman dan coba lagi.',
+                    ]);
+                }
+
+                $hasProductionStarted = (int) $item->qty_completed > 0
+                    || (int) $item->packed_quantity > 0
+                    || (int) $item->quality_good_quantity > 0
+                    || (int) $item->quality_damaged_quantity > 0
+                    || (int) $item->quality_short_quantity > 0
+                    || $item->factory_handover_at !== null
+                    || $item->activeSubcontractorAssignments()->exists()
+                    || $item->pieceworkAssignments()->whereNull('cancelled_at')->exists()
+                    || $item->finishingAssignments()->whereNull('completed_at')->whereNull('cancelled_at')->exists();
+
+                $removedImage = $images[$imageIndex];
+                $remainingImages = array_values(array_filter(
+                    $images,
+                    fn (string $image, int $index): bool => $index !== $imageIndex,
+                    ARRAY_FILTER_USE_BOTH,
+                ));
+                $pathsToDelete[] = $removedImage;
+
+                if ($catalogProduct instanceof Product) {
+                    $catalogImage = $this->matchingCatalogMockup($catalogProduct->mockupPaths(), $removedImage);
+                    $catalogImages = $catalogProduct->mockupPaths();
+                    if ($catalogImage === null && isset($catalogImages[$imageIndex])) {
+                        $catalogImage = $catalogImages[$imageIndex];
+                    }
+                    if ($catalogImage !== null) {
+                        $remainingCatalogImages = array_values(array_filter(
+                            $catalogImages,
+                            fn (string $image): bool => $image !== $catalogImage,
+                        ));
+                        $catalogProduct->update([
+                            'mockup' => $remainingCatalogImages[0] ?? null,
+                            'mockups' => $remainingCatalogImages ?: null,
+                        ]);
+                        $pathsToDelete[] = $catalogImage;
+                    }
+                }
+
+                $updates = [
+                    'status_images' => $remainingImages ?: null,
+                    'status_image' => $remainingImages[0] ?? null,
+                ];
+                if ($remainingImages === [] && $item->source !== 'Stock' && ! $hasProductionStarted) {
+                    $updates['status'] = 'None';
+                    $updates['factory_status'] = 'None';
+                } elseif ($remainingImages !== [] && $item->status === 'None' && $item->source !== 'Stock') {
+                    $updates['status'] = 'Produksi';
+                }
+
+                $item->update($updates);
+            } else {
+                $catalogImage = $catalogProduct?->factory_mockup;
+                $removedImage = $item->factory_drawing_image ?? $catalogImage;
+                if (blank($removedImage)) {
+                    throw ValidationException::withMessages([
+                        'image' => 'Gambar kerja PF tidak ditemukan. Muat ulang halaman dan coba lagi.',
+                    ]);
+                }
+
+                $isService = $item->factory_status === 'Service'
+                    && (int) $item->quality_damaged_quantity > 0;
+                $hasFactoryWorkStarted = (int) $item->qty_completed > 0
+                    || (int) $item->packed_quantity > 0
+                    || $item->factory_handover_at !== null
+                    || $item->activeSubcontractorAssignments()->exists()
+                    || $item->pieceworkAssignments()->whereNull('cancelled_at')->exists()
+                    || $item->finishingAssignments()->whereNull('completed_at')->whereNull('cancelled_at')->exists();
+
+                $pathsToDelete[] = $removedImage;
+                if ($catalogProduct instanceof Product && filled($catalogImage)) {
+                    $catalogProduct->update(['factory_mockup' => null]);
+                    $pathsToDelete[] = $catalogImage;
+                }
+
+                $item->update([
+                    'factory_drawing_image' => null,
+                    'factory_status' => $isService || $hasFactoryWorkStarted ? $item->factory_status : 'None',
+                ]);
+            }
+
+            $order->update(['last_edit' => now()]);
+            $order->synchronizeProductionStatusFromItems();
+        });
+
+        foreach (array_unique($pathsToDelete) as $path) {
+            $disk = Storage::disk('public');
+            if ($disk->exists($path) && ! $disk->delete($path)) {
+                throw new RuntimeException('Foto produk gagal dihapus dari penyimpanan.');
+            }
+        }
+
+        $successMessage = $imageRole === 'pb'
+            ? 'Foto PB dihapus dari order dan katalog produk.'
+            : 'Gambar PF dihapus dari order dan katalog produk.';
+
+        if ($request->expectsJson() && $imageRole === 'pf') {
+            return response()->json($this->factoryItemResponseData($orderItem->fresh(), $successMessage));
+        }
+
+        return back()->with('success', $successMessage);
+    }
+
+    /**
+     * @return array{
+     *     item_id: int,
+     *     message: string,
+     *     factory_drawing_url: ?string,
+     *     factory_drawing_empty_label: string,
+     *     factory_status_label: string,
+     *     factory_sale_price_label: string,
+     *     factory_total_price_label: string
+     * }
+     */
+    private function factoryItemResponseData(OrderItem $item, string $message): array
+    {
+        $item->loadMissing('catalogProduct:id,factory_mockup,factory_sale_price');
+        $factoryImage = $item->factory_drawing_image ?? $item->catalogProduct?->factory_mockup;
+        $factorySalePrice = $item->factory_sale_price ?? $item->catalogProduct?->factory_sale_price;
+        $factoryStatusLabel = $item->factory_status === 'None'
+            || ($item->status === 'Produksi' && $item->source !== 'Stock' && blank($item->factory_drawing_image))
+                ? 'New'
+                : ($item->factory_status === 'Ready' ? 'Selesai' : $item->factory_status);
+        $factorySalePriceLabel = $factorySalePrice !== null
+            ? 'Rp '.number_format((float) $factorySalePrice, 0, ',', '.')
+            : 'Belum diisi';
+        $factoryQuantity = $item->source === 'Stock'
+            ? min((int) $item->stock_factory_quantity, (int) $item->qty)
+            : (int) $item->qty;
+
+        return [
+            'item_id' => $item->id,
+            'message' => $message,
+            'factory_drawing_url' => filled($factoryImage) ? asset('storage/'.$factoryImage) : null,
+            'factory_drawing_empty_label' => $item->factory_status === 'Service'
+                ? 'Tidak wajib untuk Service.'
+                : 'Belum ada gambar PF.',
+            'factory_status_label' => $factoryStatusLabel,
+            'factory_sale_price_label' => $factorySalePriceLabel,
+            'factory_total_price_label' => $factorySalePrice === null || $factoryQuantity === 0
+                ? '—'
+                : 'Rp '.number_format((float) $factorySalePrice * $factoryQuantity, 0, ',', '.'),
+        ];
+    }
+
+    /**
+     * @param  list<string>  $catalogImages
+     */
+    private function matchingCatalogMockup(array $catalogImages, string $orderImage): ?string
+    {
+        foreach ($catalogImages as $catalogImage) {
+            if ($this->imagesMatch($catalogImage, $orderImage)) {
+                return $catalogImage;
+            }
+        }
+
+        return null;
+    }
+
+    private function imagesMatch(string $firstPath, string $secondPath): bool
+    {
+        $disk = Storage::disk('public');
+        if (! $disk->exists($firstPath) || ! $disk->exists($secondPath)) {
+            return false;
+        }
+
+        return hash_equals(
+            hash('sha256', $disk->get($firstPath)),
+            hash('sha256', $disk->get($secondPath)),
+        );
+    }
+
+    private function copyFactoryMockupToCatalog(string $factoryDrawingPath): string
+    {
+        $disk = Storage::disk('public');
+        $extension = pathinfo($factoryDrawingPath, PATHINFO_EXTENSION);
+        $catalogMockupPath = 'catalog/mockups/'.Str::uuid().($extension !== '' ? '.'.$extension : '');
+
+        if (! $disk->copy($factoryDrawingPath, $catalogMockupPath)) {
+            throw new RuntimeException('Mockup PF gagal disalin ke katalog produk.');
+        }
+
+        return $catalogMockupPath;
+    }
+
+    private function copyCatalogFactoryMockupToOrder(string $catalogMockupPath): string
+    {
+        $disk = Storage::disk('public');
+        if (! $disk->exists($catalogMockupPath)) {
+            throw ValidationException::withMessages([
+                'factory_drawing_image' => 'Mockup PF di katalog tidak ditemukan. Unggah gambar kerja baru.',
+            ]);
+        }
+
+        $extension = pathinfo($catalogMockupPath, PATHINFO_EXTENSION);
+        $orderDrawingPath = 'orders/factory-drawings/'.Str::uuid().($extension !== '' ? '.'.$extension : '');
+        if (! $disk->copy($catalogMockupPath, $orderDrawingPath)) {
+            throw new RuntimeException('Mockup PF katalog gagal disalin ke order.');
+        }
+
+        return $orderDrawingPath;
     }
 
     public function recordQuality(Request $request, OrderItem $orderItem): RedirectResponse
@@ -463,6 +872,7 @@ class OrderProductController extends Controller
             'quantity' => ['required', 'integer', 'min:1'],
             'severity' => $severityRules,
             'note' => ['nullable', 'string', 'max:1000'],
+            'evidence' => ['nullable', 'required_if:result,Rusak,Kurang', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
         ]);
 
         DB::transaction(function () use ($orderItem, $validated): void {
@@ -477,7 +887,7 @@ class OrderProductController extends Controller
             $isStockReadinessCheck = $isStockAtDistribution || $isStockInTransit;
             $availableQuantity = $isStockAtDistribution
                 ? $item->quality_unchecked_quantity
-                : (int) $item->packed_quantity;
+                : $item->quality_inspection_available_quantity;
 
             if ($order->status === 'Cancel' || ($item->status !== 'Dalam Perjalanan' && ! $isStockAtDistribution)) {
                 throw ValidationException::withMessages([
@@ -485,16 +895,18 @@ class OrderProductController extends Controller
                 ]);
             }
 
-            if (in_array($result, ['Bagus', 'Rusak'], true) && $quantity > $availableQuantity) {
+            if ($quantity > $availableQuantity) {
                 throw ValidationException::withMessages([
-                    'quantity' => 'Jumlah yang diperiksa melebihi produk yang tersedia untuk pemeriksaan.',
+                    'quantity' => 'Jumlah yang diperiksa melebihi produk selesai finishing yang tersedia untuk pemeriksaan.',
                 ]);
             }
 
             if ($result === 'Kurang') {
                 $missingQuantity = $isStockAtDistribution
                     ? $item->quality_unchecked_quantity
-                    : ($isStockReadinessCheck ? (int) $item->packed_quantity : $item->quality_shortage_available);
+                    : ($isStockReadinessCheck
+                        ? (int) $item->packed_quantity
+                        : min($item->quality_shortage_available, $availableQuantity));
 
                 if ($quantity > $missingQuantity) {
                     throw ValidationException::withMessages([
@@ -508,6 +920,7 @@ class OrderProductController extends Controller
                     $item->packed_quantity = (int) $item->packed_quantity - $quantity;
                 }
                 $item->quality_good_quantity = (int) $item->quality_good_quantity + $quantity;
+                $item->pb_accepted_at = now();
                 if ($isStockReadinessCheck && ! $isStockAtDistribution) {
                     $item->quality_damaged_quantity = max(0, (int) $item->quality_damaged_quantity - $quantity);
                 }
@@ -516,21 +929,19 @@ class OrderProductController extends Controller
                     $item->packed_quantity = (int) $item->packed_quantity - $quantity;
                 }
                 if ($isStockReadinessCheck) {
-                    $isSevere = $validated['severity'] === 'Parah';
                     $item->services()->create([
                         'quantity' => $quantity,
-                        'status' => $isSevere ? 'Produksi' : 'Service',
+                        'status' => 'Produksi',
                         'severity' => $validated['severity'],
                         'note' => $validated['note'] ?? null,
                     ]);
-                    if ($isSevere) {
-                        $item->quality_damaged_quantity += $quantity;
-                        $item->status = 'Produksi';
-                        $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
-                    }
-                } else {
-                    $item->quality_damaged_quantity += $quantity;
                 }
+                $item->quality_damaged_quantity += $quantity;
+                if ($item->source !== 'Stock') {
+                    $item->qty_completed = max(0, (int) $item->qty_completed - $quantity);
+                }
+                $item->status = 'Produksi';
+                $item->factory_status = 'Service';
             } else {
                 if (! $isStockAtDistribution) {
                     $item->packed_quantity = max(0, (int) $item->packed_quantity - $quantity);
@@ -546,16 +957,18 @@ class OrderProductController extends Controller
                     ? $item->quality_unchecked_quantity > 0
                     : (int) $item->packed_quantity > 0;
 
-                if ($hasUnitsAwaitingQuality) {
+                if ($result === 'Rusak') {
+                    $item->save();
+                } elseif ($hasUnitsAwaitingQuality) {
                     if ((int) $item->quality_damaged_quantity > 0) {
-                        $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                        $item->factory_status = 'Service';
                     }
 
                     $item->save();
                 } elseif ((int) $item->quality_damaged_quantity > 0) {
                     $item->update([
                         'status' => 'Produksi',
-                        'factory_status' => filled($item->factory_drawing_image) ? 'Produksi' : 'None',
+                        'factory_status' => 'Service',
                     ]);
                 } elseif (
                     (int) $item->quality_good_quantity + (int) $item->quality_short_quantity >= (int) $item->qty
@@ -574,6 +987,8 @@ class OrderProductController extends Controller
 
                     $item->save();
                 }
+            } elseif ($result === 'Rusak' && $item->source !== 'Stock') {
+                $item->save();
             } else {
                 $item->save();
                 $item->synchronizeWorkflowStatuses();
@@ -587,6 +1002,7 @@ class OrderProductController extends Controller
                 'description' => "{$order->order_id} - {$item->product}: {$quantity} {$result}"
                     .(filled($validated['severity'] ?? null) ? " ({$validated['severity']})" : '')
                     .(filled($validated['note'] ?? null) ? ' · '.$validated['note'] : ''),
+                'image_path' => $this->storeQualityEvidence($validated['evidence'] ?? null),
                 'occurred_at' => now(),
             ]);
         });
@@ -602,6 +1018,7 @@ class OrderProductController extends Controller
             'result' => ['required', Rule::in(['Bagus', 'Rusak'])],
             'quantity' => ['required', 'integer', 'min:1'],
             'note' => ['nullable', 'string', 'max:1000'],
+            'evidence' => ['nullable', 'required_if:result,Rusak', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
         ]);
 
         DB::transaction(function () use ($orderItemService, $validated): void {
@@ -647,16 +1064,21 @@ class OrderProductController extends Controller
 
             if ($validated['result'] === 'Bagus') {
                 $item->quality_good_quantity += $quantity;
+                $item->pb_accepted_at = now();
             } else {
                 $item->quality_damaged_quantity += $quantity;
                 $item->status = 'Produksi';
-                $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                $item->factory_status = $this->hasRequiredFactoryProductionData($item)
+                    ? 'Siap Produksi'
+                    : 'None';
             }
 
             if ($validated['result'] === 'Bagus') {
                 if ((int) $item->quality_damaged_quantity > 0) {
                     $item->status = 'Produksi';
-                    $item->factory_status = filled($item->factory_drawing_image) ? 'Produksi' : 'None';
+                    $item->factory_status = $this->hasRequiredFactoryProductionData($item)
+                        ? 'Siap Produksi'
+                        : 'None';
                 } elseif (
                     $item->quality_unchecked_quantity === 0
                     && (int) $item->quality_good_quantity + (int) $item->quality_short_quantity >= (int) $item->qty
@@ -680,6 +1102,7 @@ class OrderProductController extends Controller
                 'title' => 'Hasil Service produk dicatat',
                 'description' => "{$order->order_id} - {$item->product}: {$quantity} {$validated['result']}"
                     .(filled($validated['note'] ?? null) ? ' · '.$validated['note'] : ''),
+                'image_path' => $this->storeQualityEvidence($validated['evidence'] ?? null),
                 'occurred_at' => now(),
             ]);
         });
@@ -715,6 +1138,20 @@ class OrderProductController extends Controller
         ));
     }
 
+    private function storeQualityEvidence(?UploadedFile $evidence): ?string
+    {
+        if ($evidence === null) {
+            return null;
+        }
+
+        $path = $evidence->store('orders/quality-checks', 'public');
+        if (! is_string($path)) {
+            throw new RuntimeException('Foto bukti pemeriksaan kualitas gagal disimpan.');
+        }
+
+        return $path;
+    }
+
     /**
      * @param  list<string>  $statusImages
      */
@@ -731,6 +1168,12 @@ class OrderProductController extends Controller
         abort_unless(! $user->isOwner() || $user->activeBusinessUnit() === User::UNIT_BALI, 404);
     }
 
+    private function hasRequiredFactoryProductionData(OrderItem $item): bool
+    {
+        return filled($item->factory_drawing_image)
+            && ($item->source === 'Stock' || $item->factory_sale_price !== null);
+    }
+
     /**
      * @return list<string>
      */
@@ -738,7 +1181,7 @@ class OrderProductController extends Controller
     {
         if ($user->isOwner()) {
             return $user->activeBusinessUnit() === User::UNIT_FACTORY
-                ? ['None', 'Produksi', 'Finishing', 'Packing']
+                ? ['None', 'Service', 'Siap Produksi', 'Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Packing']
                 : ['Dalam Perjalanan', 'Distribusi'];
         }
 
@@ -749,7 +1192,7 @@ class OrderProductController extends Controller
         }
 
         if ($user->canAccessUnit(User::UNIT_FACTORY)) {
-            $statuses = array_merge($statuses, ['None', 'Produksi', 'Finishing', 'Packing']);
+            $statuses = array_merge($statuses, ['None', 'Service', 'Siap Produksi', 'Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Packing']);
         }
 
         return array_values(array_unique($statuses));
@@ -761,7 +1204,7 @@ class OrderProductController extends Controller
     private function editableStatusesFor(User $user): array
     {
         if ($user->isFactoryWorkflow()) {
-            return ['Produksi', 'Finishing', 'Packing'];
+            return ['Service', 'Siap Produksi', 'Produksi', 'Proses Kirim', 'Distribusi', 'Finishing', 'Packing'];
         }
 
         if ($user->isOwner()) {

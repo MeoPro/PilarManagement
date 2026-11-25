@@ -21,6 +21,6 @@
         <p><strong>Unit:</strong> {{ $admin->workspaceName() }}</p>
         <p><strong>Menu:</strong> {{ $accessibleMenus->implode(', ') ?: 'Tidak ada menu' }}</p>
         <p><strong>Status:</strong> {{ $admin->is_active ? 'Aktif' : 'Nonaktif' }}</p>
-        <p><strong>Dibuat:</strong> {{ $admin->created_at->format('d/m/Y H:i') }} WITA</p>
+        <p><strong>Dibuat:</strong> {{ $admin->created_at->copy()->setTimezone(auth()->user()->timezone())->format('d/m/Y H:i') }} {{ auth()->user()->timezoneLabel() }}</p>
     </section>
 @endsection

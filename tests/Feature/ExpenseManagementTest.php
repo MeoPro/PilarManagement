@@ -14,6 +14,11 @@ test('owner records expenses per unit and the server calculates the total', func
         ->assertOk();
 
     $this->actingAs($owner)
+        ->put(route('admin.business-unit-preferences.update'), [
+            'business_unit' => User::UNIT_FACTORY,
+        ]);
+
+    $this->actingAs($owner)
         ->post(route('expenses.store'), [
             'business_unit' => User::UNIT_FACTORY,
             'description' => 'Bensin harian',
@@ -43,6 +48,50 @@ test('owner records expenses per unit and the server calculates the total', func
         ->assertRedirect(route('expenses.show', $expense));
 
     expect((float) $expense->fresh()->total)->toBe(37500.0);
+});
+
+test('editing an expense recalculates its amount in the revenue report', function () {
+    $this->travelTo('2026-11-19 10:00:00');
+    $admin = User::factory()->admin()->create([
+        'accessible_menus' => ['expenses', 'revenue'],
+    ]);
+
+    $this->actingAs($admin)
+        ->post(route('expenses.store'), [
+            'description' => 'Pembelian perlengkapan',
+            'quantity' => 2,
+            'unit' => 'box',
+            'unit_price' => '10,000',
+            'occurred_at' => '2026-11-19',
+        ])
+        ->assertRedirect(route('expenses.index'));
+    $expense = Expense::query()->where('description', 'Pembelian perlengkapan')->firstOrFail();
+
+    $this->get(route('expenses.index'))
+        ->assertSeeText('+ Tambah Pengeluaran')
+        ->assertSeeText('Detail')
+        ->assertSeeText('Edit');
+
+    $this->put(route('expenses.update', $expense), [
+        'description' => 'Pembelian perlengkapan',
+        'quantity' => 3,
+        'unit' => 'box',
+        'unit_price' => '12,500',
+        'occurred_at' => '2026-11-19',
+    ])->assertRedirect(route('expenses.show', $expense));
+
+    $this->assertDatabaseHas('expenses', [
+        'id' => $expense->id,
+        'business_unit' => User::UNIT_BALI,
+        'total' => 37500,
+    ]);
+
+    $this->get(route('revenue.index', [
+        'from' => '2026-11-01',
+        'to' => '2026-11-19',
+    ]))
+        ->assertViewHas('expenseTotal', 37500.0)
+        ->assertViewHas('totalOutgoing', 37500.0);
 });
 
 test('expense filters default the end date to today and exclude future expenses', function () {

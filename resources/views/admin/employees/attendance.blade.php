@@ -213,7 +213,9 @@
                                                 name="unit_price"
                                                 value="{{ $assignment->unit_price ?? '' }}"
                                                 inputmode="decimal"
-                                                @required($employee->business_unit === \App\Models\User::UNIT_BALI)
+                                                data-money-input
+                                                autocomplete="off"
+                                                required
                                             >
                                         </label>
                                         <label>

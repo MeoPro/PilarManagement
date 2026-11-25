@@ -35,22 +35,37 @@
                 <strong>Rp {{ number_format($orderStats->total_revenue ?? 0, 0, '.', ',') }}</strong>
                 <x-layout.icon name="reports" class="order-summary-icon" />
             </article>
+        @elseif($factoryWorkflow)
+            <article class="order-summary-card is-revenue">
+                <span>Total Pendapatan PF ke PB</span>
+                <strong>Rp {{ number_format($orderStats->factory_revenue ?? 0, 0, '.', ',') }}</strong>
+                <small>Produk yang sudah diserahkan ke PB</small>
+                <x-layout.icon name="reports" class="order-summary-icon" />
+            </article>
         @endif
         <article class="order-summary-card is-orders">
             <span>Total Order Bulan Ini</span>
             <strong>{{ number_format($orderStats->total_orders ?? 0) }}</strong>
             <x-layout.icon name="orders" class="order-summary-icon" />
         </article>
-        <article class="order-summary-card is-pending">
-            <span>{{ $canManageSales ? 'Pending' : 'Dalam Proses' }}</span>
-            <strong>{{ number_format($canManageSales ? ($orderStats->pending_orders ?? 0) : ($orderStats->active_orders ?? 0)) }}</strong>
-            <x-layout.icon name="calendar" class="order-summary-icon" />
-        </article>
-        <article class="order-summary-card is-completed">
-            <span>Selesai</span>
-            <strong>{{ number_format($orderStats->completed_orders ?? 0) }}</strong>
-            <x-layout.icon name="dashboard" class="order-summary-icon" />
-        </article>
+        @if($canManageSales)
+            <article class="order-summary-card is-pending">
+                <span>Sisa Pembayaran Order Berjalan</span>
+                <strong>Rp {{ number_format($orderStats->unpaid_amount ?? 0, 0, '.', ',') }}</strong>
+                <x-layout.icon name="alert" class="order-summary-icon" />
+            </article>
+        @else
+            <article class="order-summary-card is-pending">
+                <span>Dalam Proses</span>
+                <strong>{{ number_format($orderStats->active_orders ?? 0) }}</strong>
+                <x-layout.icon name="calendar" class="order-summary-icon" />
+            </article>
+            <article class="order-summary-card is-completed">
+                <span>Selesai</span>
+                <strong>{{ number_format($orderStats->completed_orders ?? 0) }}</strong>
+                <x-layout.icon name="dashboard" class="order-summary-icon" />
+            </article>
+        @endif
     </section>
 
     <section class="order-list-panel">
@@ -201,6 +216,20 @@
                                         <a href="{{ route('orders.edit', $order) }}" class="icon-button" aria-label="Edit order {{ $order->order_id }}" title="Edit order">
                                             <x-layout.icon name="pencil" />
                                         </a>
+                                        @if($order->can_request_order_cancellation)
+                                            <form
+                                                action="{{ route('orders.cancellations.store', $order) }}"
+                                                method="POST"
+                                                onsubmit="return confirm('Ajukan pembatalan seluruh order ini ke PF? Nilai order akan dikurangi setelah disetujui.')"
+                                            >
+                                                @csrf
+                                                <button type="submit" class="btn btn-danger" aria-label="Ajukan cancel order {{ $order->order_id }}">
+                                                    Cancel
+                                                </button>
+                                            </form>
+                                        @elseif($order->has_pending_order_cancellation)
+                                            <small class="muted" role="status">Permintaan cancel order sedang menunggu keputusan PF.</small>
+                                        @endif
                                         @if($order->canBeDeleted())
                                             <form action="{{ route('orders.destroy', $order) }}" method="POST" onsubmit="return confirm('Hapus order ini?')">
                                                 @csrf
@@ -227,27 +256,55 @@
                             <th>Order</th>
                             <th>Produk</th>
                             <th>Ready</th>
-                            <th>{{ $factoryWorkflow ? 'Target PF / Kirim' : 'Target Kirim' }}</th>
+                            @if($factoryWorkflow)
+                                <th>Omzet PF ke PB</th>
+                            @endif
+                            <th>{{ $factoryWorkflow ? 'Target PF / Sisa' : 'Target Kirim' }}</th>
                             <th>Status Produksi</th>
                             <th>Aksi</th>
                         </tr>
                     </thead>
                     <tbody>
                         @forelse($orders as $order)
+                            @php($factoryWorkStarted = $order->items->isNotEmpty()
+                                && $order->items->every(fn ($item) => filled($item->factory_status) && $item->factory_status !== 'None'))
+                            @php($factoryStatusLabel = ! $factoryWorkStarted
+                                ? 'New'
+                                : ($order->status === 'None' ? 'Proses Produksi' : $order->status))
+                            @php($factoryStatusClass = match($factoryStatusLabel) {
+                                'New' => 'pending',
+                                'Proses Produksi' => 'processing',
+                                'Service' => 'service',
+                                'Finishing' => 'finishing',
+                                'Packing' => 'packing',
+                                'Distribusi' => 'distribution',
+                                'Selesai' => 'completed',
+                                'Cancel' => 'cancelled',
+                                default => 'pending',
+                            })
                             <tr>
-                                <td><a class="order-number" href="{{ route('orders.show', $order) }}">SPK {{ $order->order_id }}</a></td>
                                 <td>
-                                    @foreach($order->items as $item)
-                                        <div>
-                                            <strong>{{ $item->product }}</strong> × {{ $item->qty }}
-                                            <small>{{ $item->overall_qty_completed }}/{{ $item->qty }} dikerjakan</small>
-                                            @if($factoryWorkflow && $item->factory_status === 'Distribusi')
-                                                <span class="factory-complete-badge">Selesai di Factory</span>
-                                            @else
-                                                <small>({{ $item->status }})</small>
+                                    <a class="order-number" href="{{ route('orders.show', $order) }}">SPK {{ $order->order_id }}</a>
+                                    <small class="order-date">{{ $order->created_at->format('M j, Y') }}</small>
+                                </td>
+                                <td>
+                                    <strong>{{ $order->items_count }}</strong>
+                                    @if($order->items->isNotEmpty())
+                                        <small class="order-item-summary">
+                                            {{ $order->items->take(2)->pluck('product')->join(', ') }}
+                                            @if($order->items_count > 2)
+                                                +{{ $order->items_count - 2 }} lainnya
                                             @endif
-                                        </div>
-                                    @endforeach
+                                        </small>
+                                        @foreach($order->items->take(2) as $item)
+                                            <small>
+                                                {{ $item->qty }} unit · {{ $item->overall_qty_completed }} dikerjakan
+                                                @if($item->factory_status === 'Distribusi')
+                                                    · Selesai di Factory
+                                                @endif
+                                            </small>
+                                        @endforeach
+                                    @endif
                                 </td>
                                 <td>
                                     <strong>{{ number_format($order->ready_percentage, 1, ',', '.') }}%</strong>
@@ -255,16 +312,33 @@
                                         {{ (int) ($order->ready_units ?? 0) }}/{{ (int) ($order->items_sum_qty ?? 0) }} unit
                                     </small>
                                 </td>
+                                @if($factoryWorkflow)
+                                    <td>Rp {{ number_format($order->factory_revenue, 0, ',', '.') }}</td>
+                                @endif
                                 <td>
                                     @if($factoryWorkflow)
-                                        <small><strong>Target PF:</strong> {{ $order->factory_deadline?->format('d/m/Y') ?? 'Belum dimulai' }}</small>
-                                        <small>Target kirim PB: {{ $order->deadline?->format('d/m/Y') ?? '-' }}</small>
+                                        <small><strong>{{ $order->factory_deadline?->format('d/m/Y') ?? 'Belum dimulai' }}</strong></small>
+                                        @if($order->factory_days_remaining !== null)
+                                            <small>
+                                                @if($order->factory_days_remaining >= 0)
+                                                    {{ $order->factory_days_remaining }} hari
+                                                    @if($order->factory_days_remaining >= 7)
+                                                        / {{ intdiv($order->factory_days_remaining, 7) }} minggu
+                                                    @endif
+                                                @else
+                                                    Terlambat {{ abs($order->factory_days_remaining) }} hari
+                                                    @if(abs($order->factory_days_remaining) >= 7)
+                                                        / {{ intdiv(abs($order->factory_days_remaining), 7) }} minggu
+                                                    @endif
+                                                @endif
+                                            </small>
+                                        @endif
                                     @else
                                         {{ $order->deadline?->format('d/m/Y') ?? '-' }}
                                     @endif
                                 </td>
                                 <td>
-                                    {{ $order->status === 'None' ? 'New' : $order->status }}
+                                    <span class="order-status-pill is-{{ $factoryStatusClass }}">{{ $factoryStatusLabel }}</span>
                                     @if($factoryWorkflow ? $order->is_factory_urgent : $order->is_urgent)
                                         <span class="urgent">URGENT</span>
                                     @endif
@@ -278,7 +352,7 @@
                                 </td>
                             </tr>
                         @empty
-                            <tr><td colspan="6">Belum ada order.</td></tr>
+                            <tr><td colspan="{{ $factoryWorkflow ? 7 : 6 }}">Belum ada order.</td></tr>
                         @endforelse
                     </tbody>
                 </table>

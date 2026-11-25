@@ -29,7 +29,7 @@
                                     data-product="{{ $orderProduct->product }}"
                                     @selected((string) ($item['order_item_id'] ?? '') === (string) $orderProduct->id && empty($item['assignment_id']))
                                 >
-                                    {{ $orderProduct->product }} · tanpa penugasan (sisa {{ $orderProduct->factory_qty_remaining }})
+                                    {{ $orderProduct->product }} · tanpa penugasan (sisa {{ $orderProduct->factory_status === 'Service' ? $orderProduct->factory_production_qty_remaining : $orderProduct->factory_qty_remaining }})
                                 </option>
                             @endforeach
                         @endforeach

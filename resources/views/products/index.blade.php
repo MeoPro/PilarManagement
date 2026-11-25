@@ -26,7 +26,10 @@
                     <th>Kategori</th>
                     <th>Ukuran</th>
                     <th>Warna</th>
-                    <th>Harga</th>
+                    <th>Harga PB</th>
+                    @if($showFactorySalePrice)
+                        <th>Harga PF</th>
+                    @endif
                     <th>Aksi</th>
                 </tr>
             </thead>
@@ -53,6 +56,9 @@
                         <td>{{ $product->dimensions ?? '—' }}</td>
                         <td>{{ implode(', ', $product->colors ?? []) ?: '—' }}</td>
                         <td>Rp {{ number_format((float) $product->price, 0, '.', ',') }}</td>
+                        @if($showFactorySalePrice)
+                            <td>{{ $product->factory_sale_price !== null ? 'Rp '.number_format((float) $product->factory_sale_price, 0, ',', '.') : '—' }}</td>
+                        @endif
                         <td>
                             <a
                                 href="{{ route('products.edit', $product) }}"
@@ -82,7 +88,7 @@
                     </tr>
                 @empty
                     <tr>
-                        <td colspan="8">Belum ada produk katalog.</td>
+                        <td colspan="{{ $showFactorySalePrice ? 9 : 8 }}">Belum ada produk katalog.</td>
                     </tr>
                 @endforelse
             </tbody>

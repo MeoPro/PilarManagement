@@ -1,8 +1,11 @@
 <?php
 
 use App\Models\Category;
+use App\Models\Employee;
 use App\Models\Guest;
 use App\Models\Order;
+use App\Models\PieceworkAssignment;
+use App\Models\Product;
 use App\Models\Subcontractor;
 use App\Models\SubcontractorAssignment;
 use App\Models\User;
@@ -157,6 +160,7 @@ test('factory admins allocate only the remaining product quantity to active subc
         'source' => 'Order',
         'status' => 'Produksi',
         'factory_drawing_image' => 'orders/factory-drawings/subcontractor-product.png',
+        'factory_sale_price' => 100,
     ]);
 
     $this->actingAs($factoryAdmin)
@@ -242,6 +246,8 @@ test('unfinished subcontractor quantity returns to factory while completed quant
         'price' => 100,
         'source' => 'Order',
         'status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/split-work.png',
+        'factory_sale_price' => 100,
     ]);
 
     $this->actingAs($factoryAdmin)
@@ -305,6 +311,8 @@ test('factory can allocate all remaining products in an order to one subcontract
         'price' => 100,
         'source' => 'Order',
         'status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/bulk-chair.png',
+        'factory_sale_price' => 100,
     ]);
     $secondItem = $order->items()->create([
         'product' => 'Bulk Table',
@@ -313,6 +321,8 @@ test('factory can allocate all remaining products in an order to one subcontract
         'price' => 100,
         'source' => 'Order',
         'status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/bulk-table.png',
+        'factory_sale_price' => 100,
     ]);
 
     $this->actingAs($factoryAdmin)
@@ -336,6 +346,224 @@ test('factory can allocate all remaining products in an order to one subcontract
         ->and($secondItem->fresh()->factory_quantity)->toBe(2);
 });
 
+test('factory must allocate subcon per product when an order contains a piecework-assigned product', function () {
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['orders', 'order_products', 'subcontractors'],
+    ]);
+    $subcontractor = Subcontractor::factory()->create();
+    $guest = Guest::create(['name' => 'Mixed Piecework Guest']);
+    $order = Order::create([
+        'order_id' => 'SUBCON-PIECEWORK-GUARD',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 500,
+        'status' => 'Proses Produksi',
+    ]);
+    $employeeAssignedItem = $order->items()->create([
+        'product' => 'Employee Assigned Chair',
+        'qty' => 2,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/employee-chair.png',
+    ]);
+    $availableItem = $order->items()->create([
+        'product' => 'Available Table',
+        'qty' => 2,
+        'price' => 150,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/available-table.png',
+        'factory_sale_price' => 150,
+    ]);
+    $employee = Employee::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+    ]);
+    PieceworkAssignment::factory()
+        ->for($employee)
+        ->create([
+            'order_item_id' => $employeeAssignedItem->id,
+            'assigned_by_id' => $factoryAdmin->id,
+            'product_name' => $employeeAssignedItem->product,
+            'target_quantity' => 1,
+        ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('orders.show', $order))
+        ->assertSeeText('ditugaskan ke karyawan borongan')
+        ->assertSee(route('order-products.index'))
+        ->assertDontSee('id="order-subcontractor"', false);
+
+    $this->get(route('order-products.index'))
+        ->assertSeeText('Employee Assigned Chair')
+        ->assertSeeText('Available Table')
+        ->assertSeeText('Produk sudah ditugaskan ke karyawan borongan')
+        ->assertSee('id="subcontractor-'.$availableItem->id.'"', false)
+        ->assertDontSee('id="subcontractor-'.$employeeAssignedItem->id.'"', false);
+
+    $this->from(route('orders.show', $order))
+        ->post(route('orders.subcontractor-assignments.store', $order), [
+            'subcontractor_id' => $subcontractor->id,
+        ])
+        ->assertSessionHasErrors('subcontractor_id');
+
+    $this->assertDatabaseCount('subcontractor_assignments', 0);
+
+    $this->from(route('order-products.index'))
+        ->post(route('order-products.subcontractor-assignments.store', $employeeAssignedItem), [
+            'subcontractor_id' => $subcontractor->id,
+            'quantity' => 1,
+        ])
+        ->assertSessionHasErrors('subcontractor_id');
+
+    $this->assertDatabaseCount('subcontractor_assignments', 0);
+
+    $this->from(route('order-products.index'))
+        ->post(route('order-products.subcontractor-assignments.store', $availableItem), [
+            'subcontractor_id' => $subcontractor->id,
+            'quantity' => 2,
+        ])
+        ->assertRedirect(route('order-products.index'));
+
+    $this->assertDatabaseHas('subcontractor_assignments', [
+        'order_item_id' => $availableItem->id,
+        'subcontractor_id' => $subcontractor->id,
+        'assigned_quantity' => 2,
+    ]);
+    $this->assertDatabaseMissing('subcontractor_assignments', [
+        'order_item_id' => $employeeAssignedItem->id,
+    ]);
+});
+
+test('factory requires a PF photo before allocating a product to a subcontractor', function () {
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $subcontractor = Subcontractor::factory()->create();
+    $order = Order::create([
+        'order_id' => 'SUBCON-MISSING-PHOTO',
+        'guest_name' => 'Missing Photo Guest',
+        'total_order' => 100,
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'No Photo Product',
+        'qty' => 1,
+        'price' => 100,
+        'factory_sale_price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('order-products.index'))
+        ->post(route('order-products.subcontractor-assignments.store', $item), [
+            'subcontractor_id' => $subcontractor->id,
+            'quantity' => 1,
+        ])
+        ->assertSessionHasErrors('subcontractor_id')
+        ->assertSessionHas('errors', fn ($errors): bool => $errors->getBag('default')->first('subcontractor_id')
+            === 'Unggah gambar kerja PF atau pastikan Mockup PF (gambar kedua) tersedia sebelum produk dialokasikan ke subcon.');
+
+    expect($item->subcontractorAssignments()->exists())->toBeFalse();
+});
+
+test('factory accepts the catalog second photo and requires a selling price before subcontractor allocation', function () {
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $subcontractor = Subcontractor::factory()->create();
+    $product = Product::factory()->create([
+        'factory_mockup' => 'catalog/mockups/second-photo.png',
+    ]);
+    $order = Order::create([
+        'order_id' => 'SUBCON-SECOND-PHOTO',
+        'guest_name' => 'Second Photo Guest',
+        'total_order' => 100,
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => $product->name,
+        'product_id' => $product->id,
+        'qty' => 1,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('order-products.index'))
+        ->post(route('order-products.subcontractor-assignments.store', $item), [
+            'subcontractor_id' => $subcontractor->id,
+            'quantity' => 1,
+        ])
+        ->assertSessionHasErrors('subcontractor_id')
+        ->assertSessionHas('errors', fn ($errors): bool => $errors->getBag('default')->first('subcontractor_id')
+            === 'Harga jual per unit ke PB wajib disimpan sebelum produk dialokasikan ke subcon.');
+
+    expect($item->subcontractorAssignments()->exists())->toBeFalse();
+
+    $item->update(['factory_sale_price' => 100]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('order-products.index'))
+        ->assertSee('id="subcontractor-'.$item->id.'"', false);
+
+    $this->post(route('order-products.subcontractor-assignments.store', $item), [
+        'subcontractor_id' => $subcontractor->id,
+        'quantity' => 1,
+    ])->assertRedirect();
+
+    $this->assertDatabaseHas('subcontractor_assignments', [
+        'order_item_id' => $item->id,
+        'subcontractor_id' => $subcontractor->id,
+        'assigned_quantity' => 1,
+    ]);
+});
+
+test('factory bulk allocation rolls back when any eligible product lacks a PB selling price', function () {
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['orders', 'subcontractors'],
+    ]);
+    $subcontractor = Subcontractor::factory()->create();
+    $order = Order::create([
+        'order_id' => 'SUBCON-BULK-MISSING-PRICE',
+        'guest_name' => 'Missing Price Guest',
+        'total_order' => 100,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->items()->create([
+        'product' => 'Priced Chair',
+        'qty' => 1,
+        'price' => 100,
+        'factory_sale_price' => 100,
+        'factory_drawing_image' => 'orders/factory-drawings/priced-chair.png',
+        'source' => 'Order',
+        'status' => 'Produksi',
+    ]);
+    $missingPriceItem = $order->items()->create([
+        'product' => 'Unpriced Table',
+        'qty' => 1,
+        'price' => 100,
+        'factory_drawing_image' => 'orders/factory-drawings/unpriced-table.png',
+        'source' => 'Order',
+        'status' => 'Produksi',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->from(route('orders.show', $order))
+        ->post(route('orders.subcontractor-assignments.store', $order), [
+            'subcontractor_id' => $subcontractor->id,
+        ])
+        ->assertSessionHasErrors('subcontractor_id')
+        ->assertSessionHas('errors', fn ($errors): bool => $errors->getBag('default')->first('subcontractor_id')
+            === 'Harga jual per unit ke PB wajib disimpan sebelum produk dialokasikan ke subcon.');
+
+    expect($order->items()->whereHas('subcontractorAssignments')->exists())->toBeFalse();
+    expect($missingPriceItem->fresh()->subcontractorAssignments()->exists())->toBeFalse();
+});
+
 test('order product reaches distribution only after factory and subcon allocations are complete', function () {
     Storage::fake('public');
     $factoryAdmin = User::factory()->factoryAdmin()->create([
@@ -356,6 +584,8 @@ test('order product reaches distribution only after factory and subcon allocatio
         'price' => 100,
         'source' => 'Order',
         'status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/split-progress.png',
+        'factory_sale_price' => 100,
     ]);
 
     $this->actingAs($factoryAdmin)
@@ -389,8 +619,8 @@ test('order product reaches distribution only after factory and subcon allocatio
     ])->assertRedirect();
     $this->assertDatabaseHas('order_items', [
         'id' => $item->id,
-        'factory_status' => 'Proses Kirim',
-        'status' => 'Proses Kirim',
+        'factory_status' => 'Distribusi',
+        'status' => 'Distribusi',
     ]);
 
     $this->patch(route('order-products.update', $item), [
@@ -407,7 +637,7 @@ test('order product reaches distribution only after factory and subcon allocatio
         'id' => $item->id,
         'status' => 'Distribusi',
     ]);
-    expect($order->fresh()->status)->toBe('Finishing');
+    expect($order->fresh()->status)->toBe('Distribusi');
 });
 
 test('subcontractor management is unavailable outside factory menu access', function () {

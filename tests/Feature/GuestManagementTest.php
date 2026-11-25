@@ -185,7 +185,7 @@ test('guest list and profile show the total number of recorded orders', function
         ->assertSee('Jumlah order:</strong> 3 kali', false);
 });
 
-test('guest list summarizes completed unpaid debt, indebted guests, and all guests', function () {
+test('guest list separates completed debt from unpaid active order balances', function () {
     $indebtedGuest = Guest::create(['name' => 'Guest With Completed Debt']);
     $secondIndebtedGuest = Guest::create(['name' => 'Second Indebted Guest']);
     $paidGuest = Guest::create(['name' => 'Paid Guest']);
@@ -195,6 +195,7 @@ test('guest list summarizes completed unpaid debt, indebted guests, and all gues
         [$indebtedGuest, 'DEBT-FIRST', 100000, 20000, 'Selesai'],
         [$indebtedGuest, 'DEBT-SECOND', 60000, 0, 'Selesai'],
         [$indebtedGuest, 'DEBT-ACTIVE', 25000, 0, 'Produksi'],
+        [$indebtedGuest, 'DEBT-ACTIVE-PARTIAL', 80000, 50000, 'Packing'],
         [$secondIndebtedGuest, 'DEBT-THIRD', 30000, 0, 'Selesai'],
         [$paidGuest, 'DEBT-PAID', 50000, 50000, 'Selesai'],
         [$paidGuest, 'DEBT-CANCELLED', 200000, 0, 'Cancel'],
@@ -213,9 +214,17 @@ test('guest list summarizes completed unpaid debt, indebted guests, and all gues
         ->get(route('guests.index', ['search' => 'Guest With Completed Debt']))
         ->assertViewHas('totalGuestDebt', 170000.0)
         ->assertViewHas('indebtedGuestCount', 2)
+        ->assertViewHas('runningUnpaidTotal', 55000.0)
         ->assertViewHas('totalGuestCount', 4)
+        ->assertViewHas('guests', function ($guests) use ($indebtedGuest): bool {
+            $guest = $guests->firstWhere('id', $indebtedGuest->id);
+
+            return $guest !== null && (float) $guest->unpaid_amount === 55000.0;
+        })
+        ->assertSeeText('Sisa Pembayaran Order Berjalan')
         ->assertSeeText('Jumlah tamu berhutang')
         ->assertSeeText('Total semua tamu')
+        ->assertSeeText('Rp 55.000')
         ->assertSeeText('Rp 170.000')
         ->assertSeeText('2 tamu')
         ->assertSeeText('4 tamu');

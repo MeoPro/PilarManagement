@@ -62,7 +62,7 @@ class GuestController extends Controller
                 'unpaid_amount' => Order::query()
                     ->selectRaw('COALESCE(SUM(CASE WHEN orders.total_order > orders.paid_amount THEN orders.total_order - orders.paid_amount ELSE 0 END), 0)')
                     ->whereColumn('orders.guest_id', 'guests.id')
-                    ->where('orders.status', '!=', 'Cancel'),
+                    ->whereNotIn('orders.status', ['Selesai', 'Cancel']),
             ])
             ->withCount('orders')
             ->withSum(['orders' => fn ($query) => $query->where('status', '!=', 'Cancel')], 'total_order')
@@ -84,14 +84,14 @@ class GuestController extends Controller
         };
 
         $guests = $guests->paginate(15)->withQueryString();
-        $guestDebtSummary = Order::query()
-            ->where('status', 'Selesai')
-            ->whereColumn('paid_amount', '<', 'total_order')
-            ->selectRaw('COALESCE(SUM(total_order - paid_amount), 0) AS total_debt')
-            ->selectRaw('COUNT(DISTINCT guest_id) AS indebted_guest_count')
+        $guestPaymentSummary = Order::query()
+            ->selectRaw('COALESCE(SUM(CASE WHEN status = ? AND paid_amount < total_order THEN total_order - paid_amount ELSE 0 END), 0) AS total_debt', ['Selesai'])
+            ->selectRaw('COUNT(DISTINCT CASE WHEN status = ? AND paid_amount < total_order THEN guest_id END) AS indebted_guest_count', ['Selesai'])
+            ->selectRaw('COALESCE(SUM(CASE WHEN status NOT IN (?, ?) AND paid_amount < total_order THEN total_order - paid_amount ELSE 0 END), 0) AS running_unpaid_total', ['Selesai', 'Cancel'])
             ->first();
-        $totalGuestDebt = (float) $guestDebtSummary->total_debt;
-        $indebtedGuestCount = (int) $guestDebtSummary->indebted_guest_count;
+        $totalGuestDebt = (float) $guestPaymentSummary->total_debt;
+        $indebtedGuestCount = (int) $guestPaymentSummary->indebted_guest_count;
+        $runningUnpaidTotal = (float) $guestPaymentSummary->running_unpaid_total;
         $totalGuestCount = Guest::query()->count();
 
         return view('guests.index', compact(
@@ -101,6 +101,7 @@ class GuestController extends Controller
             'sortOptions',
             'totalGuestDebt',
             'indebtedGuestCount',
+            'runningUnpaidTotal',
             'totalGuestCount',
         ));
     }

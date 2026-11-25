@@ -5,6 +5,7 @@ import './order-chat-reminders';
 import './order-comments';
 import './order-list-filter';
 import './order-product-rework';
+import './factory-order-forms';
 import './kanban-board';
 import './piecework-items';
 import './piecework-assignment-actions';

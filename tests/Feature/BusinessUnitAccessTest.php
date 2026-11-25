@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
 
-test('factory admin can view production order data without customer or price information', function () {
+test('factory admin can view production data without customer or PB price information', function () {
     $guest = Guest::create([
         'name' => 'Private Customer',
         'address' => 'Private Customer Address',
@@ -40,6 +40,7 @@ test('factory admin can view production order data without customer or price inf
         ->assertSee('Production Table')
         ->assertDontSee('Private Customer')
         ->assertDontSee('08123456789')
+        ->assertDontSee('Sisa Pembayaran Order Berjalan')
         ->assertDontSee('950,000')
         ->assertDontSee('125,000')
         ->assertDontSee('475,000');
@@ -60,7 +61,7 @@ test('factory admin can view production order data without customer or price inf
         ->assertSeeText('Produk diproduksi');
 });
 
-test('factory admin can update production status but cannot change sales data', function () {
+test('factory admin can update PF status but cannot change sales data', function () {
     Storage::fake('public');
     $guest = Guest::create(['name' => 'Sales Customer']);
     $order = Order::create([
@@ -69,25 +70,27 @@ test('factory admin can update production status but cannot change sales data', 
         'guest_name' => $guest->name,
         'phone' => '08111111111',
         'total_order' => 300000,
-        'status' => 'None',
+        'status' => 'Proses Produksi',
     ]);
     $item = $order->items()->create([
         'product' => 'Production Chair',
         'qty' => 1,
         'price' => 300000,
         'source' => 'Order',
-        'status' => 'None',
+        'status' => 'Produksi',
+        'factory_status' => 'Siap Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/production-chair.png',
+        'factory_sale_price' => 125000,
     ]);
     $factoryAdmin = User::factory()->factoryAdmin()->create();
 
-    $response = $this->actingAs($factoryAdmin)->patch(route('orders.production.update', $order), [
-        'status' => 'Proses Produksi',
-        'items' => [[
-            'id' => $item->id,
-            'status' => 'Produksi',
-            'status_image' => UploadedFile::fake()->create('production.jpg', 100, 'image/jpeg'),
-            'price' => 1,
-        ]],
+    $response = $this->actingAs($factoryAdmin)->patch(route('order-products.update', $item), [
+        'items' => [
+            $item->id => [
+                'status' => 'Produksi',
+                'qty_completed' => 0,
+            ],
+        ],
         'guest_name' => 'Tampered Customer',
         'phone' => '0000000000',
         'total_order' => 1,
@@ -105,14 +108,16 @@ test('factory admin can update production status but cannot change sales data', 
         'id' => $item->id,
         'status' => 'Produksi',
         'price' => 300000,
+        'factory_status' => 'Produksi',
+        'factory_sale_price' => 125000,
     ]);
     $this->assertDatabaseHas('order_events', [
         'order_id' => $order->id,
-        'type' => 'order_status_changed',
+        'type' => 'item_factory_status_changed',
     ]);
 });
 
-test('factory admin cannot move an order to finishing while a product is still in production', function () {
+test('PB cannot reset a product after it has entered production', function () {
     $guest = Guest::create(['name' => 'Progress Customer']);
     $order = Order::create([
         'order_id' => 'FACTORY-PROGRESS',
@@ -128,11 +133,14 @@ test('factory admin cannot move an order to finishing while a product is still i
         'status' => 'Produksi',
     ]);
 
-    $this->actingAs(User::factory()->factoryAdmin()->create())
+    $this->actingAs(User::factory()->admin()->create())
         ->patch(route('orders.production.update', $order), [
-            'status' => 'Finishing',
+            'items' => [[
+                'id' => $order->items()->first()->id,
+                'status' => 'None',
+            ]],
         ])
-        ->assertSessionHasErrors('status');
+        ->assertSessionHasErrors('items.0.status');
 
     $this->assertDatabaseHas('orders', [
         'id' => $order->id,

@@ -31,7 +31,7 @@
             @endif
         </div>
         <div>
-            <strong>Foto Mockup:</strong>
+            <strong>Gambar 1 · Mockup PB:</strong>
             @if($product->mockupPaths() !== [])
                 <div class="order-mockup-gallery">
                     @foreach($product->mockupPaths() as $mockupPath)
@@ -47,6 +47,20 @@
             @endif
         </div>
         <div>
+            <strong>Gambar 2 · Mockup PF (gambar kedua):</strong>
+            @if($product->factory_mockup)
+                <p>
+                    <img
+                        class="product-catalog-photo product-catalog-photo-large"
+                        src="{{ asset('storage/'.$product->factory_mockup) }}"
+                        alt="Mockup PF {{ $product->name }}"
+                    >
+                </p>
+            @else
+                <span>Belum ada mockup PF</span>
+            @endif
+        </div>
+        <div>
             <strong>Nama:</strong>
             <span>{{ $product->name }}</span>
         </div>
@@ -59,9 +73,15 @@
             <span>{{ $product->category?->name ?? '—' }}</span>
         </div>
         <div>
-            <strong>Harga:</strong>
+            <strong>Harga PB per unit:</strong>
             <span>Rp {{ number_format((float) $product->price, 0, ',', '.') }}</span>
         </div>
+        @if($showFactorySalePrice)
+            <div>
+                <strong>Harga PF per unit:</strong>
+                <span>{{ $product->factory_sale_price !== null ? 'Rp '.number_format((float) $product->factory_sale_price, 0, ',', '.') : '—' }}</span>
+            </div>
+        @endif
         <div>
             <strong>Ukuran (P x L x T):</strong>
             <span>{{ $product->dimensions ?? '—' }}</span>

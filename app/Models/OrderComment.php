@@ -14,7 +14,18 @@ class OrderComment extends Model
         'parent_id',
         'business_unit',
         'body',
+        'edited_at',
+        'retracted_at',
+        'retracted_by_id',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'edited_at' => 'datetime',
+            'retracted_at' => 'datetime',
+        ];
+    }
 
     protected static function booted(): void
     {
@@ -31,6 +42,11 @@ class OrderComment extends Model
     public function author(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function retractedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'retracted_by_id');
     }
 
     public function parent(): BelongsTo

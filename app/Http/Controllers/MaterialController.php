@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Material;
+use App\Models\MaterialTransaction;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
@@ -17,10 +18,7 @@ class MaterialController extends Controller
 {
     public function index(Request $request): View
     {
-        $query = Material::query()
-            ->withSum(['transactions as stock_in_quantity' => fn (Builder $query) => $query->where('type', 'in')], 'quantity')
-            ->withSum(['transactions as stock_out_quantity' => fn (Builder $query) => $query->where('type', 'out')], 'quantity')
-            ->orderBy('name');
+        $query = $this->withInventorySummary(Material::query())->orderBy('name');
 
         if ($request->user()->isOwner()) {
             $unit = $request->query('business_unit');
@@ -99,10 +97,7 @@ class MaterialController extends Controller
     public function show(Request $request, Material $material): View
     {
         $this->authorizeMaterialUnit($request->user(), $material);
-        $material = Material::query()
-            ->withSum(['transactions as stock_in_quantity' => fn (Builder $query) => $query->where('type', 'in')], 'quantity')
-            ->withSum(['transactions as stock_out_quantity' => fn (Builder $query) => $query->where('type', 'out')], 'quantity')
-            ->findOrFail($material->id);
+        $material = $this->withInventorySummary(Material::query())->findOrFail($material->id);
         $transactions = $material->transactions()
             ->with('createdBy:id,name')
             ->latest('occurred_at')
@@ -199,6 +194,79 @@ class MaterialController extends Controller
             ->with('success', 'Transaksi stok berhasil dicatat.');
     }
 
+    public function editTransaction(Request $request, Material $material, MaterialTransaction $transaction): View
+    {
+        $this->authorizeMaterialUnit($request->user(), $material);
+        $this->authorizeMaterialTransaction($material, $transaction);
+
+        return view('materials.transaction-edit', [
+            'material' => $material,
+            'transaction' => $transaction,
+            'timezone' => $request->user()->timezone(),
+            'timezoneLabel' => $request->user()->timezoneLabel(),
+        ]);
+    }
+
+    public function updateTransaction(
+        Request $request,
+        Material $material,
+        MaterialTransaction $transaction,
+    ): RedirectResponse {
+        $this->authorizeMaterialUnit($request->user(), $material);
+        $this->authorizeMaterialTransaction($material, $transaction);
+
+        if ($transaction->type === 'in') {
+            $this->normalizeMoney($request, 'unit_price');
+        }
+
+        $validated = $request->validate([
+            'quantity' => ['required', 'numeric', 'gt:0', 'max:999999999'],
+            'unit_price' => [
+                Rule::requiredIf($transaction->type === 'in'),
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+        ]);
+
+        DB::transaction(function () use ($material, $transaction, $validated): void {
+            $lockedMaterial = Material::query()
+                ->whereKey($material->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+            $lockedTransaction = $lockedMaterial->transactions()
+                ->whereKey($transaction->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $changes = ['quantity' => (float) $validated['quantity']];
+            if ($lockedTransaction->type === 'in') {
+                $changes['unit_price'] = (float) $validated['unit_price'];
+            }
+            $lockedTransaction->update($changes);
+
+            $this->recalculateOutgoingUnitPrices($lockedMaterial);
+
+            $latestPurchasePrice = $lockedMaterial->transactions()
+                ->where('type', 'in')
+                ->latest('created_at')
+                ->latest('id')
+                ->value('unit_price');
+            if ($latestPurchasePrice !== null) {
+                $lockedMaterial->update(['unit_price' => $latestPurchasePrice]);
+            }
+        });
+
+        return redirect()
+            ->route('materials.show', $material)
+            ->with('success', 'Transaksi stok berhasil diperbarui.');
+    }
+
+    private function authorizeMaterialTransaction(Material $material, MaterialTransaction $transaction): void
+    {
+        abort_unless((int) $transaction->material_id === (int) $material->id, 404);
+    }
+
     private function authorizeMaterialUnit(User $user, Material $material): void
     {
         abort_unless(
@@ -239,6 +307,20 @@ class MaterialController extends Controller
         }
     }
 
+    private function withInventorySummary(Builder $query): Builder
+    {
+        $inventoryValue = DB::table('material_transactions')
+            ->selectRaw(
+                "COALESCE(SUM(CASE WHEN type = 'in' THEN quantity * unit_price ELSE -(quantity * unit_price) END), 0)",
+            )
+            ->whereColumn('material_transactions.material_id', 'materials.id');
+
+        return $query
+            ->withSum(['transactions as stock_in_quantity' => fn (Builder $query) => $query->where('type', 'in')], 'quantity')
+            ->withSum(['transactions as stock_out_quantity' => fn (Builder $query) => $query->where('type', 'out')], 'quantity')
+            ->selectSub($inventoryValue, 'current_inventory_value');
+    }
+
     private function weightedAverageUnitPrice(Material $material): float
     {
         $quantityOnHand = 0.0;
@@ -272,5 +354,36 @@ class MaterialController extends Controller
         }
 
         return round($inventoryValue / $quantityOnHand, 2);
+    }
+
+    private function recalculateOutgoingUnitPrices(Material $material): void
+    {
+        $quantityOnHand = 0.0;
+        $inventoryValue = 0.0;
+
+        foreach ($material->transactions()->orderBy('created_at')->orderBy('id')->lockForUpdate()->get() as $transaction) {
+            $quantity = (float) $transaction->quantity;
+
+            if ($transaction->type === 'in') {
+                $quantityOnHand += $quantity;
+                $inventoryValue += $quantity * (float) $transaction->unit_price;
+
+                continue;
+            }
+
+            if ($quantity > $quantityOnHand + 0.001) {
+                throw ValidationException::withMessages([
+                    'quantity' => 'Perubahan tidak dapat disimpan karena membuat saldo stok berikutnya menjadi negatif.',
+                ]);
+            }
+
+            $averageUnitPrice = $quantityOnHand > 0 ? $inventoryValue / $quantityOnHand : 0;
+            $roundedUnitPrice = round($averageUnitPrice, 2);
+            if (round((float) $transaction->unit_price, 2) !== $roundedUnitPrice) {
+                $transaction->update(['unit_price' => $roundedUnitPrice]);
+            }
+            $inventoryValue -= $quantity * $averageUnitPrice;
+            $quantityOnHand -= $quantity;
+        }
     }
 }

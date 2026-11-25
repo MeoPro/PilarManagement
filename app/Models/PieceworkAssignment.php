@@ -27,6 +27,7 @@ class PieceworkAssignment extends Model
         'cancellation_note',
         'unit_price',
         'target_deadline',
+        'is_rework',
         'completed_at',
         'cancelled_at',
     ];
@@ -39,6 +40,7 @@ class PieceworkAssignment extends Model
             'cancelled_quantity' => 'integer',
             'unit_price' => 'decimal:2',
             'target_deadline' => 'date',
+            'is_rework' => 'boolean',
             'completed_at' => 'datetime',
             'cancelled_at' => 'datetime',
         ];

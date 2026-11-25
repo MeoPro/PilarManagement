@@ -285,10 +285,119 @@ const initializePieceworkItems = () => {
     });
 };
 
+const initializeFactoryPieceworkAssignmentForms = () => {
+    document.querySelectorAll('[data-factory-piecework-assignment-form]').forEach((form) => {
+        if (form.dataset.factoryPieceworkInitialized === 'true') {
+            return;
+        }
+
+        form.dataset.factoryPieceworkInitialized = 'true';
+        const list = form.querySelector('[data-factory-piecework-list]');
+        const addButton = form.querySelector('[data-factory-piecework-add]');
+        const availableProductCount = list.querySelector('[data-factory-piecework-product]')
+            .querySelectorAll('option[value]:not([value=""])').length;
+
+        const updateRows = () => {
+            const rows = [...list.querySelectorAll('[data-factory-piecework-item]')];
+            const selectedProducts = new Set(rows
+                .map((row) => row.querySelector('[data-factory-piecework-product]').value)
+                .filter(Boolean));
+
+            rows.forEach((row, index) => {
+                row.querySelectorAll('[data-factory-piecework-field]').forEach((input) => {
+                    input.name = `assignments[${index}][${input.dataset.factoryPieceworkField}]`;
+                });
+
+                const productSelect = row.querySelector('[data-factory-piecework-product]');
+                const quantityInput = row.querySelector('[data-factory-piecework-quantity]');
+                const availableOutput = row.querySelector('[data-factory-piecework-available]');
+                const selectedOption = productSelect.selectedOptions[0];
+                const deadlineControl = row.querySelector('[data-deadline-control]');
+                const deadlineDaysInput = deadlineControl.querySelector('[data-deadline-days]');
+                const maxDeadline = deadlineControl.querySelector('[data-deadline-date]').max;
+
+                if (selectedOption?.value) {
+                    const availableQuantity = Number(selectedOption.dataset.remaining) || 0;
+                    quantityInput.max = String(availableQuantity);
+                    if (Number(quantityInput.value) > availableQuantity) {
+                        quantityInput.value = String(availableQuantity);
+                    }
+                    availableOutput.textContent = `Sisa yang dapat ditugaskan: ${availableQuantity} unit.`;
+                } else {
+                    quantityInput.removeAttribute('max');
+                    availableOutput.textContent = 'Pilih produk untuk melihat jumlah yang tersedia.';
+                }
+
+                if (maxDeadline) {
+                    const maxDays = (utcDateValue(maxDeadline) - utcDateValue(deadlineControl.dataset.deadlineToday))
+                        / (24 * 60 * 60 * 1000);
+                    deadlineDaysInput.max = String(maxDays);
+                } else {
+                    deadlineDaysInput.removeAttribute('max');
+                }
+
+                row.querySelector('[data-factory-piecework-remove]').disabled = rows.length === 1;
+            });
+
+            rows.forEach((row) => {
+                const productSelect = row.querySelector('[data-factory-piecework-product]');
+                const selectedProductId = productSelect.value;
+                productSelect.querySelectorAll('option[value]:not([value=""])').forEach((option) => {
+                    option.disabled = selectedProducts.has(option.value) && option.value !== selectedProductId;
+                });
+            });
+
+            addButton.disabled = rows.length >= availableProductCount;
+        };
+
+        list.addEventListener('change', (event) => {
+            if (event.target.matches('[data-factory-piecework-product]')) {
+                updateRows();
+            }
+        });
+
+        list.addEventListener('input', (event) => {
+            if (event.target.matches('[data-factory-piecework-price]')) {
+                formatMoneyInput(event.target);
+            }
+        });
+
+        list.addEventListener('click', (event) => {
+            const removeButton = event.target.closest('[data-factory-piecework-remove]');
+            if (!removeButton || list.querySelectorAll('[data-factory-piecework-item]').length === 1) {
+                return;
+            }
+
+            removeButton.closest('[data-factory-piecework-item]').remove();
+            updateRows();
+        });
+
+        addButton.addEventListener('click', () => {
+            const row = list.querySelector('[data-factory-piecework-item]').cloneNode(true);
+            row.querySelector('[data-factory-piecework-product]').value = '';
+            row.querySelector('[data-factory-piecework-quantity]').value = '1';
+            row.querySelector('[data-factory-piecework-price]').value = '';
+
+            const deadlineControl = row.querySelector('[data-deadline-control]');
+            deadlineControl.querySelector('[data-deadline-date]').value = form.dataset.defaultDeadline;
+            deadlineControl.querySelector('[data-deadline-days]').value = '';
+            delete deadlineControl.dataset.deadlineInitialized;
+
+            list.append(row);
+            initializeDeadlineControl(deadlineControl);
+            updateRows();
+        });
+
+        list.querySelectorAll('[data-deadline-control]').forEach(initializeDeadlineControl);
+        updateRows();
+    });
+};
+
 const initializePieceworkForms = () => {
     document.querySelectorAll('[data-deadline-control]').forEach(initializeDeadlineControl);
     initializeAssignmentForms();
     initializePieceworkItems();
+    initializeFactoryPieceworkAssignmentForms();
 };
 
 document.addEventListener('pilar:navigated', initializePieceworkForms);

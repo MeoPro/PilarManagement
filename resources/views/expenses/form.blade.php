@@ -43,6 +43,18 @@
         @endif
 
         <div>
+            <label for="expense-category">Kategori</label>
+            <select id="expense-category" name="category" required>
+                @foreach($categories as $category)
+                    <option value="{{ $category }}" @selected(old('category', $expense->category ?? 'Additional') === $category)>
+                        {{ $category }}
+                    </option>
+                @endforeach
+            </select>
+            <small>Pengeluaran tidak menambah stok. Pembelian yang sudah dicatat di menu Material jangan dicatat ulang di sini.</small>
+        </div>
+
+        <div>
             <label for="expense-description">Deskripsi</label>
             <input id="expense-description" type="text" name="description" value="{{ old('description', $expense->description) }}" maxlength="255" required>
         </div>

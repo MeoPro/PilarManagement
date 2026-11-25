@@ -10,8 +10,8 @@
         </label>
         <button type="button" class="btn" data-piecework-fill-all>Semua</button>
         <label>
-            <span>Alasan / catatan</span>
-            <textarea name="note" rows="3" maxlength="1000" required data-piecework-action-note></textarea>
+            <span data-piecework-note-label>Alasan / catatan (opsional saat penyelesaian)</span>
+            <textarea name="note" rows="3" maxlength="1000" data-piecework-action-note></textarea>
         </label>
         <div class="piecework-action-actions">
             <button type="button" class="btn" data-piecework-action-close>Batal</button>

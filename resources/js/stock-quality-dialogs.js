@@ -12,6 +12,7 @@ document.addEventListener('click', (event) => {
         const result = form.querySelector('[data-stock-quality-result-value]');
         const severityField = form.querySelector('[data-stock-quality-severity-field]');
         const severity = form.querySelector('[data-stock-quality-severity]');
+        const evidence = form.querySelector('[data-stock-quality-evidence]');
         const maxQuantity = Number.parseInt(trigger.dataset.stockQualityMax ?? '', 10);
         const qualityResult = trigger.dataset.stockQualityResult;
         const actionUrl = trigger.dataset.stockQualityUrl;
@@ -20,6 +21,7 @@ document.addEventListener('click', (event) => {
             || !(result instanceof HTMLInputElement)
             || !(severityField instanceof HTMLElement)
             || !(severity instanceof HTMLSelectElement)
+            || !(evidence instanceof HTMLInputElement)
             || !qualityResult
             || !actionUrl
             || !Number.isInteger(maxQuantity)
@@ -32,6 +34,7 @@ document.addEventListener('click', (event) => {
         severityField.hidden = qualityResult !== 'Rusak';
         severity.required = qualityResult === 'Rusak';
         severity.value = '';
+        evidence.required = ['Rusak', 'Kurang'].includes(qualityResult);
         quantity.max = String(maxQuantity);
         quantity.value = '';
         form.querySelector('[data-stock-quality-title]').textContent = `Pemeriksaan ${qualityResult}`;
@@ -65,6 +68,25 @@ document.addEventListener('click', (event) => {
             activeDialog.close();
         }
     }
+
+    const serviceResultButton = event.target.closest('button[name="result"]');
+    const serviceForm = serviceResultButton?.closest('[data-quality-evidence-form]');
+    const serviceEvidence = serviceForm?.querySelector('[data-quality-evidence]');
+    if (serviceResultButton instanceof HTMLButtonElement && serviceEvidence instanceof HTMLInputElement) {
+        serviceEvidence.required = ['Rusak', 'Kurang'].includes(serviceResultButton.value);
+    }
+});
+
+document.addEventListener('change', (event) => {
+    if (!(event.target instanceof HTMLSelectElement)
+        || !event.target.matches('[data-quality-evidence-result]')) {
+        return;
+    }
+
+    const evidence = event.target.closest('form')?.querySelector('[data-quality-evidence]');
+    if (evidence instanceof HTMLInputElement) {
+        evidence.required = ['Rusak', 'Kurang'].includes(event.target.value);
+    }
 });
 
 document.addEventListener('click', (event) => {
@@ -85,11 +107,15 @@ document.addEventListener('close', (event) => {
         form.reset();
         const severityField = form.querySelector('[data-stock-quality-severity-field]');
         const severity = form.querySelector('[data-stock-quality-severity]');
+        const evidence = form.querySelector('[data-stock-quality-evidence]');
         if (severityField instanceof HTMLElement) {
             severityField.hidden = true;
         }
         if (severity instanceof HTMLSelectElement) {
             severity.required = false;
+        }
+        if (evidence instanceof HTMLInputElement) {
+            evidence.required = false;
         }
     }
 }, true);

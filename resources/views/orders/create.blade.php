@@ -625,7 +625,7 @@
                     value="1"
                     min="1"
                     required
-                    oninput="calculateTotal()"
+                    oninput="updateStockSource(this.closest('tr')); calculateTotal()"
                 >
 
             </td>
@@ -675,20 +675,12 @@
 
             <td>
 
-                <select
+                <input
+                    type="hidden"
                     name="items[${productIndex}][source]"
-                    required
+                    value="Order"
                 >
-
-                    <option value="Stock">
-                        Stock
-                    </option>
-
-                    <option value="Order" selected>
-                        Order
-                    </option>
-
-                </select>
+                <span data-stock-source-label>Order · Produksi PF</span>
 
             </td>
 
@@ -714,6 +706,7 @@
 
 
         container.appendChild(row);
+        updateStockSource(row);
 
         if (oldItem) {
             row.querySelector('[name$="[product]"]').value = oldItem.product ?? '';
@@ -731,6 +724,7 @@
                 String(product.id) === String(oldItem.product_id)
             );
             setCatalogMockupPreview(row, oldCatalogProduct);
+            updateStockSource(row);
         }
 
         formatPriceInput(row.querySelector('[name$="[price]"]'), true);
@@ -983,6 +977,35 @@
         preview.hidden = (product?.mockup_urls ?? []).length === 0;
     }
 
+    function updateStockSource(row)
+    {
+        if (!row) {
+            return;
+        }
+
+        const sourceInput = row.querySelector('[name$="[source]"]');
+        const productId = row.querySelector('[name$="[product_id]"]')?.value;
+        const quantity = Number(row.querySelector('[name$="[qty]"]')?.value ?? 1);
+        const product = catalogProducts.find(candidate => String(candidate.id) === String(productId));
+        const stockQuantity = Number(product?.stock_bali_quantity ?? 0)
+            + Number(product?.stock_factory_quantity ?? 0);
+        const canUseStock = product && product.has_factory_sale_price && stockQuantity > 0;
+        const stockUsed = Math.min(stockQuantity, quantity);
+
+        if (sourceInput) {
+            sourceInput.value = canUseStock ? 'Stock' : 'Order';
+        }
+
+        const sourceLabel = row.querySelector('[data-stock-source-label]');
+        if (sourceLabel) {
+            sourceLabel.textContent = canUseStock && stockUsed < quantity
+                ? `Stock ${stockUsed} · Produksi ${quantity - stockUsed}`
+                : canUseStock
+                    ? `Stock · ${stockUsed} unit`
+                    : 'Order · Produksi PF';
+        }
+    }
+
     function updateProductDetails(input, selectedCatalogProductId = null, selectedColor = null)
     {
         const row = input.closest('tr');
@@ -1050,6 +1073,7 @@
             }
         }
 
+        updateStockSource(row);
         calculateTotal();
     }
 

@@ -22,10 +22,12 @@ use App\Http\Controllers\KanbanTaskController;
 use App\Http\Controllers\MaterialController;
 use App\Http\Controllers\OrderCommentController;
 use App\Http\Controllers\OrderController;
+use App\Http\Controllers\OrderItemCancellationController;
 use App\Http\Controllers\OrderPaymentController;
 use App\Http\Controllers\OrderProductController;
 use App\Http\Controllers\PieceworkAssignmentController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\ProductStockController;
 use App\Http\Controllers\RevenueController;
 use App\Http\Controllers\SubcontractorAssignmentController;
 use App\Http\Controllers\SubcontractorController;
@@ -58,14 +60,34 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
     Route::get('/order-products', [OrderProductController::class, 'index'])
         ->middleware('menu:order_products')
         ->name('order-products.index');
+    Route::get('/product-stock', [ProductStockController::class, 'index'])
+        ->middleware('menu:product_stock')
+        ->name('product-stock.index');
+    Route::post('/product-stock/{product}/add', [ProductStockController::class, 'add'])
+        ->middleware('menu:product_stock')
+        ->whereNumber('product')
+        ->name('product-stock.add');
+    Route::post('/product-stock/{product}/transfer', [ProductStockController::class, 'transfer'])
+        ->middleware('menu:product_stock')
+        ->whereNumber('product')
+        ->name('product-stock.transfer');
     Route::patch('/order-products/{orderItem}', [OrderProductController::class, 'update'])
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
         ->name('order-products.update');
+    Route::patch('/order-item-cancellations/{orderItemCancellation}', [OrderItemCancellationController::class, 'update'])
+        ->middleware('menu:order_products')
+        ->whereNumber('orderItemCancellation')
+        ->name('order-item-cancellations.update');
     Route::patch('/order-products/{orderItem}/factory-drawing', [OrderProductController::class, 'updateFactoryDrawing'])
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
         ->name('order-products.factory-drawing.update');
+    Route::delete('/order-products/{orderItem}/images/{imageRole}/{imageIndex}', [OrderProductController::class, 'destroyImage'])
+        ->whereNumber('orderItem')
+        ->where('imageRole', 'pb|pf')
+        ->whereNumber('imageIndex')
+        ->name('order-products.images.destroy');
     Route::post('/order-products/{orderItem}/quality', [OrderProductController::class, 'recordQuality'])
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
@@ -78,10 +100,18 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
         ->middleware('menu:order_products')
         ->whereNumber('orderItem')
         ->name('order-items.piecework-assignments.store');
+    Route::post('/orders/{order}/piecework-assignments', [PieceworkAssignmentController::class, 'storeForOrder'])
+        ->middleware('menu:order_products')
+        ->whereNumber('order')
+        ->name('orders.piecework-assignments.store');
     Route::patch('/piecework-assignments/{pieceworkAssignment}', [PieceworkAssignmentController::class, 'update'])
         ->middleware('menu:order_products')
         ->whereNumber('pieceworkAssignment')
         ->name('piecework-assignments.update');
+    Route::patch('/piecework-assignments/{pieceworkAssignment}/rate', [PieceworkAssignmentController::class, 'updateRate'])
+        ->middleware('menu:order_products')
+        ->whereNumber('pieceworkAssignment')
+        ->name('piecework-assignments.rate.update');
     Route::patch('/piecework-assignments/{pieceworkAssignment}/complete', [PieceworkAssignmentController::class, 'complete'])
         ->middleware('menu:order_products')
         ->whereNumber('pieceworkAssignment')
@@ -115,6 +145,12 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
         ->whereNumber('comment')
         ->scopeBindings()
         ->name('orders.comments.update');
+    Route::patch('/orders/{order}/comments/{comment}/retract', [OrderCommentController::class, 'retract'])
+        ->middleware('menu:orders')
+        ->whereNumber('order')
+        ->whereNumber('comment')
+        ->scopeBindings()
+        ->name('orders.comments.retract');
 
     Route::get('/', function () {
         return redirect()->route('admin.index');
@@ -163,6 +199,12 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
             Route::resource('orders', OrderController::class)
                 ->except(['index', 'show'])
                 ->names('orders');
+            Route::post('/order-items/{orderItem}/cancellations', [OrderItemCancellationController::class, 'store'])
+                ->whereNumber('orderItem')
+                ->name('order-items.cancellations.store');
+            Route::post('/orders/{order}/cancellations', [OrderItemCancellationController::class, 'storeForOrder'])
+                ->whereNumber('order')
+                ->name('orders.cancellations.store');
             Route::post('/orders/{order}/payments', [OrderPaymentController::class, 'store'])
                 ->whereNumber('order')
                 ->name('orders.payments.store');
@@ -191,6 +233,14 @@ Route::middleware(['auth', 'admin', 'activity'])->group(function () {
     });
 
     Route::middleware('menu:materials')->group(function () {
+        Route::get('/materials/{material}/transactions/{transaction}/edit', [MaterialController::class, 'editTransaction'])
+            ->whereNumber('material')
+            ->whereNumber('transaction')
+            ->name('materials.transactions.edit');
+        Route::patch('/materials/{material}/transactions/{transaction}', [MaterialController::class, 'updateTransaction'])
+            ->whereNumber('material')
+            ->whereNumber('transaction')
+            ->name('materials.transactions.update');
         Route::post('/materials/{material}/transactions', [MaterialController::class, 'storeTransaction'])
             ->whereNumber('material')
             ->name('materials.transactions.store');

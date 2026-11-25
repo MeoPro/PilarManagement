@@ -34,6 +34,18 @@ class SubcontractorAssignmentController extends Controller
                 ]);
             }
 
+            if ($item->pieceworkAssignments()->whereNull('cancelled_at')->exists()) {
+                throw ValidationException::withMessages([
+                    'subcontractor_id' => 'Produk ini sudah ditugaskan ke karyawan borongan. Pilih subcon untuk produk lain secara terpisah.',
+                ]);
+            }
+
+            if (! in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)) {
+                throw ValidationException::withMessages([
+                    'subcontractor_id' => 'Produk hanya dapat dialokasikan setelah berstatus Siap Produksi.',
+                ]);
+            }
+
             if ($item->source === 'Stock' && (int) $item->quality_damaged_quantity === 0) {
                 throw ValidationException::withMessages([
                     'subcontractor_id' => 'Produk Stock hanya dapat dialokasikan setelah masuk ke pekerjaan PF.',
@@ -42,7 +54,7 @@ class SubcontractorAssignmentController extends Controller
 
             if ($item->source === 'Stock'
                 && (blank($item->factory_drawing_image)
-                    || $item->factory_status !== 'Produksi'
+                    || ! in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)
                     || (int) $item->quality_unchecked_quantity > 0
                     || (int) $item->service_quantity > 0
                     || (int) $item->packed_quantity > 0)) {
@@ -51,6 +63,8 @@ class SubcontractorAssignmentController extends Controller
                 ]);
             }
 
+            $this->validateSubcontractorProductRequirements($item);
+
             $subcontractor = Subcontractor::query()->findOrFail($validated['subcontractor_id']);
             if (! $subcontractor->is_active) {
                 throw ValidationException::withMessages([
@@ -58,13 +72,13 @@ class SubcontractorAssignmentController extends Controller
                 ]);
             }
 
-            if (in_array($item->factory_status, ['Distribusi', 'Ready'], true)) {
+            if (in_array($item->factory_status, ['Distribusi', 'Ready', 'Finishing', 'Packing'], true)) {
                 throw ValidationException::withMessages([
                     'quantity' => 'Produk yang sudah selesai di Factory tidak dapat dialokasikan lagi.',
                 ]);
             }
 
-            $availableQuantity = max(0, $item->factory_quantity - (int) $item->qty_completed);
+            $availableQuantity = $item->factory_qty_remaining;
             if ((int) $validated['quantity'] > $availableQuantity) {
                 throw ValidationException::withMessages([
                     'quantity' => "Jumlah melebihi sisa pekerjaan Factory ({$availableQuantity}).",
@@ -79,7 +93,9 @@ class SubcontractorAssignmentController extends Controller
                 'target_deadline' => $validated['target_deadline'] ?? $order->deadline,
                 'qty_completed' => 0,
                 'status' => 'Produksi',
+                'is_rework' => (int) $item->quality_damaged_quantity > 0,
             ]);
+            $item->update(['factory_status' => 'Produksi']);
             $item->synchronizeStatusFromWorkAllocations();
             $item->refresh();
             $order->update(['last_edit' => now()]);
@@ -130,29 +146,48 @@ class SubcontractorAssignmentController extends Controller
                 ]);
             }
 
-            $createdAssignments = 0;
-            foreach ($lockedOrder->items()
+            $items = $lockedOrder->items()
                 ->withSum(['services as pending_service_quantity' => fn ($query) => $query->where('status', 'Service')], 'quantity')
+                ->with('catalogProduct:id,factory_mockup,factory_sale_price')
                 ->lockForUpdate()
-                ->get() as $item) {
+                ->get();
+
+            $hasEmployeePieceworkAssignments = OrderItem::query()
+                ->whereIn('id', $items->modelKeys())
+                ->whereHas('pieceworkAssignments', fn ($query) => $query->whereNull('cancelled_at'))
+                ->exists();
+            if ($hasEmployeePieceworkAssignments) {
+                throw ValidationException::withMessages([
+                    'subcontractor_id' => 'Salah satu produk SPK sudah ditugaskan ke karyawan borongan. Pilih subcon satu per satu melalui daftar Produk Order.',
+                ]);
+            }
+
+            $createdAssignments = 0;
+            foreach ($items as $item) {
+                if (! in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)) {
+                    continue;
+                }
+
                 if ($item->source === 'Stock'
                     && ((int) $item->quality_damaged_quantity === 0
                         || blank($item->factory_drawing_image)
-                        || $item->factory_status !== 'Produksi'
+                        || ! in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)
                         || (int) $item->quality_unchecked_quantity > 0
                         || (int) $item->service_quantity > 0
                         || (int) $item->packed_quantity > 0)) {
                     continue;
                 }
 
-                if (in_array($item->factory_status, ['Distribusi', 'Ready'], true)) {
+                if (in_array($item->factory_status, ['Distribusi', 'Ready', 'Finishing', 'Packing'], true)) {
                     continue;
                 }
 
-                $availableQuantity = max(0, $item->factory_quantity - (int) $item->qty_completed);
+                $availableQuantity = $item->factory_qty_remaining;
                 if ($availableQuantity === 0) {
                     continue;
                 }
+
+                $this->validateSubcontractorProductRequirements($item);
 
                 $assignment = $item->subcontractorAssignments()->create([
                     'subcontractor_id' => $subcontractor->id,
@@ -161,7 +196,9 @@ class SubcontractorAssignmentController extends Controller
                     'target_deadline' => $validated['target_deadline'] ?? $lockedOrder->deadline,
                     'qty_completed' => 0,
                     'status' => 'Produksi',
+                    'is_rework' => (int) $item->quality_damaged_quantity > 0,
                 ]);
+                $item->update(['factory_status' => 'Produksi']);
                 $item->synchronizeStatusFromWorkAllocations();
                 $lockedOrder->events()->create([
                     'order_item_id' => $item->id,
@@ -188,7 +225,8 @@ class SubcontractorAssignmentController extends Controller
 
     public function update(Request $request, SubcontractorAssignment $subcontractorAssignment): RedirectResponse
     {
-        abort_unless($request->user()->isFactoryWorkflow(), 403);
+        $user = $request->user();
+        abort_unless($user->isFactoryWorkflow(), 403);
 
         $validated = $request->validate([
             'qty_completed' => ['required', 'integer', 'min:0'],
@@ -197,7 +235,7 @@ class SubcontractorAssignmentController extends Controller
             'target_deadline' => ['nullable', 'date'],
         ]);
 
-        DB::transaction(function () use ($subcontractorAssignment, $validated): void {
+        DB::transaction(function () use ($subcontractorAssignment, $validated, $user): void {
             $orderId = OrderItem::query()
                 ->whereKey($subcontractorAssignment->order_item_id)
                 ->value('order_id');
@@ -245,6 +283,10 @@ class SubcontractorAssignmentController extends Controller
                 }
 
                 $completed = 0;
+                if ($assignment->is_rework) {
+                    $item->increment('quality_damaged_quantity', (int) $assignment->assigned_quantity);
+                    $item->decrement('qty_completed', (int) $assignment->assigned_quantity);
+                }
             }
 
             if (! $isReturningToProduction) {
@@ -265,6 +307,21 @@ class SubcontractorAssignmentController extends Controller
                     throw ValidationException::withMessages([
                         'qty_completed' => 'Selesaikan semua jumlah alokasi sebelum melanjutkan ke proses kirim.',
                     ]);
+                }
+
+                if (
+                    $assignment->is_rework
+                    && $nextStatus === 'Distribusi'
+                    && $previousStatus !== 'Distribusi'
+                ) {
+                    if ((int) $item->quality_damaged_quantity < (int) $assignment->assigned_quantity) {
+                        throw ValidationException::withMessages([
+                            'qty_completed' => 'Jumlah yang dikirim melebihi produk rusak yang tersedia untuk produksi ulang.',
+                        ]);
+                    }
+
+                    $item->decrement('quality_damaged_quantity', (int) $assignment->assigned_quantity);
+                    $item->increment('qty_completed', (int) $assignment->assigned_quantity);
                 }
 
                 if (
@@ -291,6 +348,9 @@ class SubcontractorAssignmentController extends Controller
                 'status' => $nextStatus,
                 'target_deadline' => $targetDeadline,
             ]);
+            if ($order->is_stock_order) {
+                $item->refresh()->addInternalStockOutput($user);
+            }
             $item->synchronizeStatusFromWorkAllocations();
             $item->refresh();
             $order->update(['last_edit' => now()]);
@@ -421,5 +481,28 @@ class SubcontractorAssignmentController extends Controller
             'description' => "{$order->order_id} - {$item->product}: {$previousStatus} -> {$nextStatus}",
             'occurred_at' => now(),
         ]);
+    }
+
+    private function validateSubcontractorProductRequirements(OrderItem $item): void
+    {
+        $hasFactoryPhoto = filled($item->factory_drawing_image)
+            || filled($item->catalogProduct?->factory_mockup);
+
+        if (! $hasFactoryPhoto) {
+            throw ValidationException::withMessages([
+                'subcontractor_id' => 'Unggah gambar kerja PF atau pastikan Mockup PF (gambar kedua) tersedia sebelum produk dialokasikan ke subcon.',
+            ]);
+        }
+
+        $catalogSalePrice = $item->catalogProduct?->factory_sale_price;
+        if ($item->source !== 'Stock' && $item->factory_sale_price === null && $catalogSalePrice !== null) {
+            $item->update(['factory_sale_price' => $catalogSalePrice]);
+        }
+
+        if ($item->source !== 'Stock' && $item->factory_sale_price === null) {
+            throw ValidationException::withMessages([
+                'subcontractor_id' => 'Harga jual per unit ke PB wajib disimpan sebelum produk dialokasikan ke subcon.',
+            ]);
+        }
     }
 }

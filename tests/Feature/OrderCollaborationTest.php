@@ -37,7 +37,7 @@ test('pilar bali comments can be read and replied to by pilar factory', function
 
     $comment = OrderComment::where('order_id', $order->id)->firstOrFail();
     $this->actingAs($baliAdmin)
-        ->get(route('orders.show', $order))
+        ->get(route('orders.edit', $order))
         ->assertSee('✓ Terkirim', false);
 
     $this->assertDatabaseHas('order_comment_recipients', [
@@ -79,7 +79,7 @@ test('pilar bali comments can be read and replied to by pilar factory', function
         ->assertSee('✓ Terkirim', false);
 
     $this->actingAs($baliAdmin)
-        ->get(route('orders.show', $order))
+        ->get(route('orders.edit', $order))
         ->assertSee('Confirmed by production.')
         ->assertSee('✓✓ Dibaca', false);
 
@@ -136,6 +136,43 @@ test('comment and reply requests return rendered fragments without redirecting t
     ]);
 });
 
+test('order and comment timestamps use the viewing business unit timezone', function () {
+    $this->travelTo('2026-03-10 10:00:00');
+    $baliAdmin = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $guest = Guest::create(['name' => 'Timezone Guest']);
+    $order = Order::create([
+        'order_id' => 'ORDER-TIMEZONE-DISPLAY',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 100000,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->items()->create([
+        'product' => 'Timezone Display Product',
+        'qty' => 1,
+        'price' => 100000,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/timezone-display.png',
+    ]);
+    $order->comments()->create([
+        'user_id' => $baliAdmin->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Timezone display comment.',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('orders.show', $order))
+        ->assertSeeText('Terakhir diubah: 10 Mar 2026 09:00 WIB')
+        ->assertSeeText('10/03/2026 09:00 WIB');
+
+    $this->actingAs($baliAdmin)
+        ->get(route('orders.edit', $order))
+        ->assertSeeText('10/03/2026 10:00 WITA');
+});
+
 test('invalid JSON comment requests return validation errors without saving a comment', function () {
     $admin = User::factory()->admin()->create();
     $order = Order::create([
@@ -177,7 +214,8 @@ test('unread order comments create a reminder after two days and are reminded on
     $this->actingAs($factoryAdmin)
         ->getJson(route('order-comments.reminders'))
         ->assertJsonPath('reminders.0.order_id', 'REMINDER-ORDER')
-        ->assertJsonPath('reminders.0.body', 'Waiting for an update.');
+        ->assertJsonPath('reminders.0.body', 'Waiting for an update.')
+        ->assertJsonPath('reminders.0.created_at', '10/03/2026 08:00 WIB');
 
     $this->getJson(route('order-comments.reminders'))
         ->assertExactJson(['reminders' => []]);
@@ -235,7 +273,14 @@ test('factory keeps distributed products as completed while each unit sees its o
         ->assertDontSee('Factory Production Item')
         ->assertDontSee('Unassigned Item');
 
-    $this->actingAs(User::factory()->owner()->create())
+    $owner = User::factory()->owner()->create();
+
+    $this->actingAs($owner)
+        ->put(route('admin.business-unit-preferences.update'), [
+            'business_unit' => User::UNIT_FACTORY,
+        ]);
+
+    $this->actingAs($owner)
         ->get(route('order-products.index'))
         ->assertSee('Factory Production Item')
         ->assertSee('Bali Distribution Item')
@@ -288,18 +333,18 @@ test('comment validation preserves entered text', function () {
     ]);
 
     $this->actingAs($owner)
-        ->from(route('orders.show', $order))
+        ->from(route('orders.edit', $order))
         ->post(route('orders.comments.store', $order), [
             'business_unit' => 'invalid',
             'body' => 'Retained comment text.',
         ])
         ->assertSessionHasErrors('business_unit');
 
-    $this->get(route('orders.show', $order))
+    $this->get(route('orders.edit', $order))
         ->assertSee('Retained comment text.');
 });
 
-test('comment authors can edit their comments from the order detail and edit pages', function () {
+test('comment authors can edit their comments from the edit page', function () {
     $admin = User::factory()->admin()->create();
     $order = Order::create([
         'order_id' => 'EDITABLE-COMMENT-ORDER',
@@ -314,11 +359,7 @@ test('comment authors can edit their comments from the order detail and edit pag
     ]);
 
     $this->actingAs($admin)
-        ->get(route('orders.show', $order))
-        ->assertSee('Edit komentar')
-        ->assertSee('Original comment.');
-
-    $this->get(route('orders.edit', $order))
+        ->get(route('orders.edit', $order))
         ->assertSee('Edit komentar')
         ->assertSee('Original comment.');
 
@@ -332,11 +373,16 @@ test('comment authors can edit their comments from the order detail and edit pag
 
     expect($response->json('html'))
         ->toContain('&lt;script&gt;')
+        ->toContain('Edited')
         ->not->toContain($updatedBody);
     $this->assertDatabaseHas('order_comments', [
         'id' => $comment->id,
         'body' => $updatedBody,
     ]);
+    expect($comment->fresh()->edited_at)->not->toBeNull();
+
+    $this->get(route('orders.edit', $order))
+        ->assertSee('Edited');
 });
 
 test('only the comment author can edit it and comments cannot be edited across orders', function () {
@@ -403,5 +449,109 @@ test('comment edit rejects an empty body without changing the saved comment', fu
     $this->assertDatabaseHas('order_comments', [
         'id' => $comment->id,
         'body' => 'Keep this comment.',
+    ]);
+});
+
+test('order edit page includes a discussion composer and returns sent comments to edit', function () {
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'EDIT-DISCUSSION-ORDER',
+        'guest_name' => 'Discussion Edit Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('orders.edit', $order))
+        ->assertSee('id="order-discussion"', false)
+        ->assertSee('name="body"', false)
+        ->assertSee('name="return_to" value="edit"', false);
+
+    $this->post(route('orders.comments.store', $order), [
+        'body' => 'Comment sent from edit.',
+        'return_to' => 'edit',
+    ])->assertRedirect(route('orders.edit', $order));
+
+    $this->assertDatabaseHas('order_comments', [
+        'order_id' => $order->id,
+        'body' => 'Comment sent from edit.',
+    ]);
+});
+
+test('admins can retract comments while preserving the original text and replies for audit', function () {
+    $author = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $order = Order::create([
+        'order_id' => 'RETRACT-COMMENT-ORDER',
+        'guest_name' => 'Retracted Comment Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+    $comment = $order->comments()->create([
+        'user_id' => $author->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Private message that should be withdrawn.',
+    ]);
+    $reply = $order->comments()->create([
+        'user_id' => $factoryAdmin->id,
+        'parent_id' => $comment->id,
+        'business_unit' => User::UNIT_FACTORY,
+        'body' => 'Reply remains in the audit thread.',
+    ]);
+    $recipient = $comment->recipients()->create(['user_id' => $factoryAdmin->id]);
+
+    $this->actingAs($factoryAdmin)
+        ->patchJson(route('orders.comments.retract', [$order, $comment]), [
+            'return_to' => 'show',
+        ])
+        ->assertOk()
+        ->assertJsonPath('message', 'Pesan berhasil ditarik.')
+        ->assertJsonPath('comment.id', $comment->id);
+
+    $discussionPage = $this->actingAs($author)
+        ->get(route('orders.edit', $order));
+
+    expect($discussionPage->getContent())
+        ->toContain("Pesan ditarik oleh {$factoryAdmin->name}.")
+        ->toContain('Reply remains in the audit thread.')
+        ->not->toContain('Private message that should be withdrawn.');
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $comment->id,
+        'body' => 'Private message that should be withdrawn.',
+        'retracted_by_id' => $factoryAdmin->id,
+    ]);
+
+    expect($recipient->fresh()->read_at)->not->toBeNull();
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $reply->id,
+        'body' => 'Reply remains in the audit thread.',
+    ]);
+});
+
+test('non-admin users cannot retract order comments', function () {
+    $admin = User::factory()->admin()->create();
+    $user = User::factory()->create(['is_admin' => false]);
+    $order = Order::create([
+        'order_id' => 'RETRACT-COMMENT-FORBIDDEN',
+        'guest_name' => 'Retract Authorization Guest',
+        'total_order' => 0,
+        'status' => 'None',
+    ]);
+    $comment = $order->comments()->create([
+        'user_id' => $admin->id,
+        'business_unit' => User::UNIT_BALI,
+        'body' => 'Keep this comment visible.',
+    ]);
+
+    $this->actingAs($user)
+        ->patchJson(route('orders.comments.retract', [$order, $comment]), [
+            'return_to' => 'show',
+        ])
+        ->assertForbidden();
+
+    $this->assertDatabaseHas('order_comments', [
+        'id' => $comment->id,
+        'body' => 'Keep this comment visible.',
+        'retracted_at' => null,
     ]);
 });

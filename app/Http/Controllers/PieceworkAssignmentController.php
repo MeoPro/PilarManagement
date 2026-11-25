@@ -6,6 +6,7 @@ use App\Models\Employee;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\PieceworkAssignment;
+use App\Models\PieceworkItem;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -56,10 +57,12 @@ class PieceworkAssignmentController extends Controller
         $user = $request->user();
         abort_unless($user->isFactoryWorkflow() && $user->canAccessMenu('order_products'), 403);
         $localToday = now($user->timezone())->toDateString();
+        $this->normalizeUnitPrice($request);
 
         $validated = $request->validate([
             'employee_id' => ['required', 'integer', 'exists:employees,id'],
             'target_quantity' => ['required', 'integer', 'min:1'],
+            'unit_price' => ['required', 'numeric', 'min:0', 'max:9999999999999.99'],
             'target_deadline' => ['required', 'date_format:Y-m-d', 'after_or_equal:'.$localToday],
         ]);
         $employee = Employee::query()
@@ -75,80 +78,181 @@ class PieceworkAssignmentController extends Controller
         }
 
         DB::transaction(function () use ($orderItem, $employee, $validated, $user): void {
+            $order = Order::query()->lockForUpdate()->findOrFail($orderItem->order_id);
             $lockedItem = OrderItem::query()
                 ->whereKey($orderItem->id)
                 ->withSum(['services as pending_service_quantity' => fn ($query) => $query->where('status', 'Service')], 'quantity')
                 ->lockForUpdate()
                 ->firstOrFail();
-            $lockedItem->load('order');
-
-            if ($lockedItem->order->status === 'Cancel') {
-                throw ValidationException::withMessages([
-                    'target_quantity' => 'Order yang dibatalkan tidak dapat ditugaskan ke borongan PF.',
-                ]);
-            }
-
-            if ($lockedItem->activeSubcontractorAssignments()->exists()) {
-                throw ValidationException::withMessages([
-                    'target_quantity' => 'Produk ini sudah dialokasikan ke Subcon dan tidak dapat ditugaskan ke borongan PF.',
-                ]);
-            }
-
-            if ($lockedItem->factory_status !== 'Produksi' || blank($lockedItem->factory_drawing_image)) {
-                throw ValidationException::withMessages([
-                    'target_quantity' => 'Produk hanya dapat ditugaskan setelah berstatus Produksi dan memiliki gambar kerja Pilar Factory.',
-                ]);
-            }
-
-            if (
-                $lockedItem->source === 'Stock'
-                && ((int) $lockedItem->quality_unchecked_quantity > 0
-                    || (int) $lockedItem->service_quantity > 0
-                    || (int) $lockedItem->packed_quantity > 0)
-            ) {
-                throw ValidationException::withMessages([
-                    'target_quantity' => 'Selesaikan pemeriksaan PB untuk seluruh Stock sebelum menugaskan produk ke borongan PF.',
-                ]);
-            }
-
-            $openAssignments = PieceworkAssignment::query()
-                ->where('order_item_id', $lockedItem->id)
-                ->whereNull('completed_at')
-                ->whereNull('cancelled_at')
-                ->withSum('pieceworkItems as produced_quantity', 'quantity')
-                ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity']);
-            $reservedQuantity = $openAssignments->sum(
-                fn (PieceworkAssignment $assignment): int => max(
-                    (int) $assignment->target_quantity
-                        - (int) ($assignment->produced_quantity ?? 0)
-                        - (int) $assignment->completed_quantity
-                        - (int) $assignment->cancelled_quantity,
-                    0,
-                ),
+            $this->createFactoryPieceworkAssignment(
+                $order,
+                $lockedItem,
+                $employee,
+                $user,
+                (int) $validated['target_quantity'],
+                (float) $validated['unit_price'],
+                $validated['target_deadline'],
+                'target_quantity',
+                'target_deadline',
             );
-            $availableQuantity = max($lockedItem->factory_qty_remaining - $reservedQuantity, 0);
-
-            if ((int) $validated['target_quantity'] > $availableQuantity) {
-                throw ValidationException::withMessages([
-                    'target_quantity' => "Jumlah penugasan melebihi sisa produk Factory ({$availableQuantity}).",
-                ]);
-            }
-
-            PieceworkAssignment::create([
-                'employee_id' => $employee->id,
-                'order_item_id' => $lockedItem->id,
-                'assigned_by_id' => $user->id,
-                'product_name' => $lockedItem->product,
-                'target_quantity' => $validated['target_quantity'],
-                'target_deadline' => $validated['target_deadline'],
-                'completed_at' => null,
-                'completed_by_id' => null,
-            ]);
         });
 
         return redirect()
             ->route('orders.show', $orderItem->order_id)
             ->with('success', 'Penugasan borongan berhasil ditambahkan.');
+    }
+
+    public function storeForOrder(Request $request, Order $order): RedirectResponse
+    {
+        $user = $request->user();
+        abort_unless($user->isFactoryWorkflow() && $user->canAccessMenu('order_products'), 403);
+        $localToday = now($user->timezone())->toDateString();
+        $this->normalizeAssignmentUnitPrices($request);
+
+        $validated = $request->validate([
+            'employee_id' => ['required', 'integer', 'exists:employees,id'],
+            'assignments' => ['required', 'array', 'min:1'],
+            'assignments.*' => ['required', 'array:order_item_id,target_quantity,unit_price,target_deadline'],
+            'assignments.*.order_item_id' => ['required', 'integer', 'distinct', 'exists:order_items,id'],
+            'assignments.*.target_quantity' => ['required', 'integer', 'min:1'],
+            'assignments.*.unit_price' => ['required', 'numeric', 'min:0', 'max:9999999999999.99'],
+            'assignments.*.target_deadline' => ['required', 'date_format:Y-m-d', 'after_or_equal:'.$localToday],
+        ]);
+        $employee = Employee::query()
+            ->whereKey($validated['employee_id'])
+            ->where('business_unit', User::UNIT_FACTORY)
+            ->where('status', 'Aktif')
+            ->firstOrFail();
+
+        if (! $employee->supportsWorkType('Borongan')) {
+            throw ValidationException::withMessages([
+                'employee_id' => 'Pilih karyawan Factory berjenis kerja Borongan.',
+            ]);
+        }
+
+        DB::transaction(function () use ($order, $employee, $validated, $user): void {
+            $lockedOrder = Order::query()->lockForUpdate()->findOrFail($order->id);
+
+            foreach ($validated['assignments'] as $index => $assignment) {
+                $lockedItem = OrderItem::query()
+                    ->where('order_id', $lockedOrder->id)
+                    ->whereKey($assignment['order_item_id'])
+                    ->withSum(['services as pending_service_quantity' => fn ($query) => $query->where('status', 'Service')], 'quantity')
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $lockedItem instanceof OrderItem) {
+                    throw ValidationException::withMessages([
+                        "assignments.{$index}.order_item_id" => 'Pilih produk dari order ini.',
+                    ]);
+                }
+
+                $this->createFactoryPieceworkAssignment(
+                    $lockedOrder,
+                    $lockedItem,
+                    $employee,
+                    $user,
+                    (int) $assignment['target_quantity'],
+                    (float) $assignment['unit_price'],
+                    $assignment['target_deadline'],
+                    "assignments.{$index}.target_quantity",
+                    "assignments.{$index}.target_deadline",
+                );
+            }
+        });
+
+        return redirect()
+            ->route('orders.show', $order)
+            ->with('success', 'Penugasan borongan berhasil ditambahkan.');
+    }
+
+    private function createFactoryPieceworkAssignment(
+        Order $order,
+        OrderItem $orderItem,
+        Employee $employee,
+        User $user,
+        int $targetQuantity,
+        float $unitPrice,
+        string $targetDeadline,
+        string $quantityErrorKey,
+        string $deadlineErrorKey,
+    ): void {
+        if ($order->status === 'Cancel') {
+            throw ValidationException::withMessages([
+                $quantityErrorKey => 'Order yang dibatalkan tidak dapat ditugaskan ke borongan PF.',
+            ]);
+        }
+
+        $orderDeadline = $order->factory_deadline ?? $order->deadline;
+        if ($orderDeadline !== null && $targetDeadline > $orderDeadline->toDateString()) {
+            throw ValidationException::withMessages([
+                $deadlineErrorKey => 'Deadline penugasan borongan tidak boleh melebihi deadline order ('.$orderDeadline->format('d/m/Y').').',
+            ]);
+        }
+
+        if ($orderItem->activeSubcontractorAssignments()->exists()) {
+            throw ValidationException::withMessages([
+                $quantityErrorKey => 'Produk ini sudah dialokasikan ke Subcon dan tidak dapat ditugaskan ke borongan PF.',
+            ]);
+        }
+
+        if (! $orderItem->allowsRegularProductionAssignment()
+            || blank($orderItem->factory_drawing_image)) {
+            throw ValidationException::withMessages([
+                $quantityErrorKey => 'Produk hanya dapat ditugaskan setelah berstatus Siap Produksi dan memiliki gambar kerja Pilar Factory.',
+            ]);
+        }
+
+        if (
+            $orderItem->source === 'Stock'
+            && ((int) $orderItem->quality_unchecked_quantity > 0
+                || (int) $orderItem->service_quantity > 0
+                || (int) $orderItem->packed_quantity > 0)
+        ) {
+            throw ValidationException::withMessages([
+                $quantityErrorKey => 'Selesaikan pemeriksaan PB untuk seluruh Stock sebelum menugaskan produk ke borongan PF.',
+            ]);
+        }
+
+        $openAssignments = PieceworkAssignment::query()
+            ->where('order_item_id', $orderItem->id)
+            ->whereNull('completed_at')
+            ->whereNull('cancelled_at')
+            ->where('is_rework', false)
+            ->withSum('pieceworkItems as produced_quantity', 'quantity')
+            ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity', 'is_rework']);
+        $reservedQuantity = $openAssignments->sum(
+            fn (PieceworkAssignment $assignment): int => max(
+                (int) $assignment->target_quantity
+                    - (int) ($assignment->produced_quantity ?? 0)
+                    - (int) $assignment->completed_quantity
+                    - (int) $assignment->cancelled_quantity,
+                0,
+            ),
+        );
+        $availableQuantity = max($orderItem->factory_production_qty_remaining - $reservedQuantity, 0);
+
+        if ($targetQuantity > $availableQuantity) {
+            throw ValidationException::withMessages([
+                $quantityErrorKey => "Jumlah penugasan melebihi sisa produk Factory ({$availableQuantity}).",
+            ]);
+        }
+
+        PieceworkAssignment::create([
+            'employee_id' => $employee->id,
+            'order_item_id' => $orderItem->id,
+            'assigned_by_id' => $user->id,
+            'product_name' => $orderItem->product,
+            'target_quantity' => $targetQuantity,
+            'unit_price' => $unitPrice,
+            'target_deadline' => $targetDeadline,
+            'is_rework' => false,
+            'completed_at' => null,
+            'completed_by_id' => null,
+        ]);
+        if ($orderItem->factory_status !== 'Service') {
+            $orderItem->update(['factory_status' => 'Produksi']);
+        }
     }
 
     public function update(Request $request, PieceworkAssignment $pieceworkAssignment): RedirectResponse
@@ -162,7 +266,7 @@ class PieceworkAssignmentController extends Controller
             'employee_id' => ['required', 'integer', 'exists:employees,id'],
             'target_quantity' => ['required', 'integer', 'min:1'],
             'target_deadline' => ['nullable', 'date_format:Y-m-d'],
-            'unit_price' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:9999999999999.99'],
+            'unit_price' => ['required', 'numeric', 'min:0', 'max:9999999999999.99'],
         ]);
 
         $employee = Employee::query()
@@ -198,8 +302,9 @@ class PieceworkAssignmentController extends Controller
                 ->whereNull('completed_at')
                 ->whereNull('cancelled_at')
                 ->whereKeyNot($lockedAssignment->id)
+                ->where('is_rework', $lockedAssignment->is_rework)
                 ->withSum('pieceworkItems as produced_quantity', 'quantity')
-                ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity']);
+                ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity', 'is_rework']);
             $reservedQuantity = $openAssignments->sum(
                 fn (PieceworkAssignment $assignment): int => max(
                     (int) $assignment->target_quantity
@@ -209,7 +314,10 @@ class PieceworkAssignmentController extends Controller
                     0,
                 ),
             );
-            $availableQuantity = max($orderItem->factory_qty_remaining - $reservedQuantity, 0);
+            $remainingFactoryQuantity = $lockedAssignment->is_rework
+                ? (int) $orderItem->factory_qty_remaining
+                : (int) $orderItem->factory_production_qty_remaining;
+            $availableQuantity = max($remainingFactoryQuantity - $reservedQuantity, 0);
             $targetQuantity = (int) $validated['target_quantity'];
             $alreadyProduced = (int) $lockedAssignment->pieceworkItems()->sum('quantity');
             $completedQuantity = (int) $lockedAssignment->completed_quantity;
@@ -242,6 +350,45 @@ class PieceworkAssignmentController extends Controller
         return back()->with('success', 'Penugasan borongan berhasil diperbarui.');
     }
 
+    public function updateRate(Request $request, PieceworkAssignment $pieceworkAssignment): RedirectResponse
+    {
+        $user = $request->user();
+        abort_unless($user->isFactoryWorkflow() && $user->canAccessMenu('order_products'), 403);
+        abort_if(
+            $pieceworkAssignment->order_item_id === null
+                || $pieceworkAssignment->employee?->business_unit !== User::UNIT_FACTORY,
+            404,
+        );
+        $this->normalizeUnitPrice($request);
+
+        $validated = $request->validate([
+            'unit_price' => ['required', 'numeric', 'min:0', 'max:9999999999999.99'],
+        ]);
+
+        DB::transaction(function () use ($pieceworkAssignment, $validated): void {
+            $lockedAssignment = PieceworkAssignment::query()
+                ->lockForUpdate()
+                ->findOrFail($pieceworkAssignment->id);
+            $completedQuantity = (int) $lockedAssignment->completed_quantity;
+
+            if ($completedQuantity < 1) {
+                throw ValidationException::withMessages([
+                    'unit_price' => 'Tidak ada jumlah selesai yang perlu dicatat ke penggajian.',
+                ]);
+            }
+
+            $lockedAssignment->update([
+                'unit_price' => $validated['unit_price'],
+            ]);
+            $this->recordPieceworkPayment($lockedAssignment, $completedQuantity);
+            $lockedAssignment->update(['completed_quantity' => 0]);
+        });
+
+        return redirect()
+            ->route('orders.show', $pieceworkAssignment->orderItem->order_id)
+            ->with('success', 'Upah borongan berhasil dicatat ke penggajian.');
+    }
+
     public function updateFromAttendance(Request $request, PieceworkAssignment $pieceworkAssignment): RedirectResponse
     {
         $user = $request->user();
@@ -254,9 +401,7 @@ class PieceworkAssignmentController extends Controller
                 ? ['required', 'string', 'max:255']
                 : ['prohibited'],
             'target_quantity' => ['required', 'integer', 'min:1'],
-            'unit_price' => $isBaliAssignment
-                ? ['required', 'numeric', 'min:0', 'max:9999999999999.99']
-                : ['nullable', 'numeric', 'min:0', 'max:9999999999999.99'],
+            'unit_price' => ['required', 'numeric', 'min:0', 'max:9999999999999.99'],
             'target_deadline' => ['required', 'date_format:Y-m-d'],
         ]);
 
@@ -305,8 +450,9 @@ class PieceworkAssignmentController extends Controller
                     ->whereNull('completed_at')
                     ->whereNull('cancelled_at')
                     ->whereKeyNot($lockedAssignment->id)
+                    ->where('is_rework', $lockedAssignment->is_rework)
                     ->withSum('pieceworkItems as produced_quantity', 'quantity')
-                    ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity']);
+                    ->get(['id', 'target_quantity', 'completed_quantity', 'cancelled_quantity', 'is_rework']);
                 $reservedQuantity = $otherAssignments->sum(
                     fn (PieceworkAssignment $assignment): int => max(
                         (int) $assignment->target_quantity
@@ -316,7 +462,10 @@ class PieceworkAssignmentController extends Controller
                         0,
                     ),
                 );
-                $availableQuantity = max($orderItem->factory_qty_remaining - $reservedQuantity, 0);
+                $remainingFactoryQuantity = $lockedAssignment->is_rework
+                    ? (int) $orderItem->factory_qty_remaining
+                    : (int) $orderItem->factory_production_qty_remaining;
+                $availableQuantity = max($remainingFactoryQuantity - $reservedQuantity, 0);
 
                 if ($targetQuantity - $alreadyProduced - $completedQuantity - $cancelledQuantity > $availableQuantity) {
                     throw ValidationException::withMessages([
@@ -413,7 +562,7 @@ class PieceworkAssignmentController extends Controller
 
         $validated = $request->validate([
             'quantity' => ['required', 'integer', 'min:0'],
-            'note' => ['required', 'string', 'max:1000'],
+            'note' => ['nullable', 'string', 'max:1000'],
         ]);
 
         DB::transaction(function () use ($pieceworkAssignment, $user, $validated, $employee): void {
@@ -461,30 +610,47 @@ class PieceworkAssignmentController extends Controller
                 ]);
             }
 
+            if (($completedQuantity > 0 || $quantityToComplete > 0) && $lockedAssignment->unit_price === null) {
+                throw ValidationException::withMessages([
+                    'quantity' => 'Isi harga borongan per unit pada penugasan sebelum mencatat hasil selesai.',
+                ]);
+            }
+
             if ($lockedAssignment->completed_at === null) {
-                $newCompletedQuantity = $completedQuantity + $quantityToComplete;
                 $updates = [
-                    'completed_quantity' => $newCompletedQuantity,
-                    'completion_note' => $validated['note'],
+                    'completed_quantity' => 0,
+                    'completion_note' => $validated['note'] ?? $lockedAssignment->completion_note,
                 ];
 
-                if ($alreadyProduced + $newCompletedQuantity + $cancelledQuantity >= (int) $lockedAssignment->target_quantity) {
+                if ($alreadyProduced + $completedQuantity + $quantityToComplete + $cancelledQuantity >= (int) $lockedAssignment->target_quantity) {
                     $updates['completed_at'] = now();
                     $updates['completed_by_id'] = $user->id;
                 }
 
                 $lockedAssignment->update($updates);
+                $this->recordPieceworkPayment($lockedAssignment, $completedQuantity);
+                $this->recordPieceworkPayment($lockedAssignment, $quantityToComplete);
 
                 if ($lockedItem !== null) {
+                    $canCompleteRegularProduction = $lockedItem->allowsRegularProductionAssignment()
+                        && (! $lockedAssignment->is_rework || $lockedItem->factory_status !== 'Service');
+
                     if ($quantityToComplete > 0
-                        && ($lockedItem->factory_status !== 'Produksi'
-                            || blank($lockedItem->factory_drawing_image))) {
+                        && (! $canCompleteRegularProduction || blank($lockedItem->factory_drawing_image))) {
                         throw ValidationException::withMessages([
                             'quantity' => 'Produk tidak lagi dapat diselesaikan karena status atau gambar kerja tidak valid.',
                         ]);
                     }
 
-                    if ($quantityToComplete > $lockedItem->factory_qty_remaining) {
+                    if ($lockedAssignment->is_rework
+                        && $quantityToComplete > (int) $lockedItem->quality_damaged_quantity) {
+                        throw ValidationException::withMessages([
+                            'quantity' => 'Jumlah selesai melebihi produk rusak yang tersedia untuk produksi ulang.',
+                        ]);
+                    }
+
+                    if (! $lockedAssignment->is_rework
+                        && $quantityToComplete > $lockedItem->factory_production_qty_remaining) {
                         throw ValidationException::withMessages([
                             'quantity' => 'Jumlah selesai melebihi sisa pekerjaan Factory.',
                         ]);
@@ -492,8 +658,12 @@ class PieceworkAssignmentController extends Controller
 
                     if ($quantityToComplete > 0) {
                         $lockedItem->increment('qty_completed', $quantityToComplete);
+                        if ($lockedAssignment->is_rework) {
+                            $lockedItem->decrement('quality_damaged_quantity', $quantityToComplete);
+                        }
                     }
 
+                    $lockedItem->refresh()->addInternalStockOutput($user);
                     $lockedItem->refresh()->synchronizeWorkflowStatuses();
                     $lockedOrder?->synchronizeProductionStatusFromItems();
                 }
@@ -525,14 +695,57 @@ class PieceworkAssignmentController extends Controller
 
     private function normalizeUnitPrice(Request $request): void
     {
-        $price = $request->input('unit_price');
-        if (! is_string($price)) {
+        $request->merge([
+            'unit_price' => $this->normalizePriceValue($request->input('unit_price')),
+        ]);
+    }
+
+    private function normalizeAssignmentUnitPrices(Request $request): void
+    {
+        $assignments = $request->input('assignments');
+
+        if (! is_array($assignments)) {
             return;
         }
 
-        $price = trim($price);
-        if (preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $price) === 1) {
-            $request->merge(['unit_price' => str_replace(',', '', $price)]);
+        foreach ($assignments as $index => $assignment) {
+            if (is_array($assignment)) {
+                $assignments[$index]['unit_price'] = $this->normalizePriceValue($assignment['unit_price'] ?? null);
+            }
         }
+
+        $request->merge(['assignments' => $assignments]);
+    }
+
+    private function normalizePriceValue(mixed $price): mixed
+    {
+        if (! is_string($price)) {
+            return $price;
+        }
+
+        $price = trim($price);
+
+        return preg_match('/\A\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\z/', $price) === 1
+            ? str_replace(',', '', $price)
+            : $price;
+    }
+
+    private function recordPieceworkPayment(PieceworkAssignment $assignment, int $quantity): void
+    {
+        if ($quantity < 1) {
+            return;
+        }
+
+        $unitPrice = (float) $assignment->unit_price;
+        PieceworkItem::create([
+            'employee_id' => $assignment->employee_id,
+            'order_item_id' => $assignment->order_item_id,
+            'piecework_assignment_id' => $assignment->id,
+            'product_name' => $assignment->product_name,
+            'quantity' => $quantity,
+            'unit_price' => $unitPrice,
+            'line_total' => round($quantity * $unitPrice, 2),
+            'target_deadline' => $assignment->target_deadline,
+        ]);
     }
 }

@@ -32,11 +32,17 @@
     <div class="order-summary-grid">
         <article class="order-summary-card is-completed">
             <span>Saldo Stok</span>
-            <strong>{{ number_format($material->current_stock, 3, ',', '.') }} {{ $material->unit }}</strong>
+            <strong>{{ $material->current_stock_display }} {{ $material->unit }}</strong>
         </article>
         <article class="order-summary-card is-revenue">
-            <span>Harga Satuan Terbaru</span>
-            <strong>Rp {{ number_format((float) $material->unit_price, 2, ',', '.') }}</strong>
+            <span>Harga Rata-rata Stok</span>
+            <strong>
+                @if($material->average_unit_price !== null)
+                    Rp {{ number_format($material->average_unit_price, 2, ',', '.') }}
+                @else
+                    —
+                @endif
+            </strong>
         </article>
     </div>
 
@@ -47,8 +53,8 @@
             <div>
                 <label for="transaction-type">Jenis Transaksi</label>
                 <select id="transaction-type" name="type" required>
-                    <option value="in" @selected(old('type') === 'in')>Stok Masuk</option>
-                    <option value="out" @selected(old('type') === 'out')>Stok Keluar</option>
+                    <option value="in" @selected(old('type', request('type')) !== 'out')>Stok Masuk</option>
+                    <option value="out" @selected(old('type', request('type')) === 'out')>Stok Keluar</option>
                 </select>
             </div>
             <div>
@@ -96,6 +102,7 @@
                         <th>Harga Satuan Biaya</th>
                         <th>Catatan</th>
                         <th>Dicatat Oleh</th>
+                        <th>Aksi</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -103,13 +110,16 @@
                         <tr>
                             <td>{{ $transaction->occurred_at->copy()->setTimezone($timezone)->format('d/m/Y H:i') }} {{ $timezoneLabel }}</td>
                             <td>{{ $transaction->type === 'in' ? 'Masuk' : 'Keluar' }}</td>
-                            <td>{{ number_format((float) $transaction->quantity, 3, ',', '.') }} {{ $material->unit }}</td>
+                            <td>{{ $transaction->quantity_display }} {{ $material->unit }}</td>
                             <td>Rp {{ number_format((float) $transaction->unit_price, 2, ',', '.') }}</td>
                             <td>{{ $transaction->note ?? '—' }}</td>
                             <td>{{ $transaction->createdBy?->name ?? '—' }}</td>
+                            <td>
+                                <a class="btn" href="{{ route('materials.transactions.edit', [$material, $transaction]) }}">Edit</a>
+                            </td>
                         </tr>
                     @empty
-                        <tr><td colspan="6">Belum ada transaksi stok.</td></tr>
+                        <tr><td colspan="7">Belum ada transaksi stok.</td></tr>
                     @endforelse
                 </tbody>
             </table>

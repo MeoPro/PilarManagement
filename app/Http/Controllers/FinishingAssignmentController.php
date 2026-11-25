@@ -41,13 +41,22 @@ class FinishingAssignmentController extends Controller
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            if ($order->status === 'Cancel' || blank($item->factory_drawing_image)) {
+            $isRework = (bool) $validated['is_rework'];
+            $isFactoryService = $item->factory_status === 'Service'
+                && (int) $item->quality_damaged_quantity > 0;
+
+            if ($order->status === 'Cancel' || (blank($item->factory_drawing_image) && ! $isFactoryService)) {
                 throw ValidationException::withMessages([
                     'order_item_id' => 'Produk harus memiliki gambar kerja dan order tidak boleh dibatalkan.',
                 ]);
             }
 
-            $isRework = (bool) $validated['is_rework'];
+            if ($isFactoryService && ! $isRework) {
+                throw ValidationException::withMessages([
+                    'is_rework' => 'Produk berstatus Service hanya dapat ditugaskan sebagai Service ulang kepada karyawan Harian.',
+                ]);
+            }
+
             $availableQuantity = $isRework
                 ? $item->rework_quantity_available
                 : $item->finishing_quantity_available;
@@ -77,7 +86,7 @@ class FinishingAssignmentController extends Controller
         $this->ensureAccess($user, $finishingAssignment);
         $validated = $request->validate([
             'quantity' => ['required', 'integer', 'min:1'],
-            'note' => ['required', 'string', 'max:1000'],
+            'note' => ['nullable', 'string', 'max:1000'],
         ]);
 
         DB::transaction(function () use ($finishingAssignment, $user, $validated): void {
@@ -94,7 +103,11 @@ class FinishingAssignmentController extends Controller
             $remainingQuantity = $assignment->remaining_quantity;
             $quantity = (int) $validated['quantity'];
 
-            if ($order->status === 'Cancel' || blank($item->factory_drawing_image)) {
+            $isFactoryService = $assignment->is_rework
+                && $item->factory_status === 'Service'
+                && (int) $item->quality_damaged_quantity > 0;
+
+            if ($order->status === 'Cancel' || (blank($item->factory_drawing_image) && ! $isFactoryService)) {
                 throw ValidationException::withMessages([
                     'quantity' => 'Order dibatalkan atau gambar kerja tidak tersedia.',
                 ]);
@@ -121,7 +134,7 @@ class FinishingAssignmentController extends Controller
             $completedQuantity = (int) $assignment->completed_quantity + $quantity;
             $updates = [
                 'completed_quantity' => $completedQuantity,
-                'completion_note' => $validated['note'],
+                'completion_note' => $validated['note'] ?? $assignment->completion_note,
             ];
             if ($completedQuantity + (int) $assignment->cancelled_quantity >= (int) $assignment->target_quantity) {
                 $updates['completed_at'] = now();
@@ -133,19 +146,35 @@ class FinishingAssignmentController extends Controller
             if ($assignment->is_rework) {
                 $item->quality_damaged_quantity = max(0, (int) $item->quality_damaged_quantity - $quantity);
             }
+            if ($isFactoryService) {
+                if ($item->source !== 'Stock') {
+                    $item->qty_completed = (int) $item->qty_completed + $quantity;
+                }
+                $item->status = $item->quality_damaged_quantity > 0 ? 'Produksi' : 'Dalam Perjalanan';
+                $item->factory_status = $item->quality_damaged_quantity > 0 ? 'Service' : 'Proses Kirim';
+            }
             $item->save();
-            $item->synchronizeWorkflowStatuses();
+            if (! $isFactoryService) {
+                $item->synchronizeWorkflowStatuses();
+            }
+            $item->refresh()->addInternalStockOutput($user);
             $order->synchronizeProductionStatusFromItems();
+            $description = "{$order->order_id} - {$item->product}: {$quantity} unit";
+            if (filled($validated['note'] ?? null)) {
+                $description .= ", catatan: {$validated['note']}";
+            }
             $order->events()->create([
                 'order_item_id' => $item->id,
                 'type' => $assignment->is_rework ? 'item_rework_completed' : 'item_finishing_completed',
-                'title' => $assignment->is_rework ? 'Finishing ulang selesai' : 'Finishing produk selesai',
-                'description' => "{$order->order_id} - {$item->product}: {$quantity} unit, catatan: {$validated['note']}",
+                'title' => $isFactoryService
+                    ? 'Service PF selesai'
+                    : ($assignment->is_rework ? 'Finishing ulang selesai' : 'Finishing produk selesai'),
+                'description' => $description,
                 'occurred_at' => now(),
             ]);
         });
 
-        return back()->with('success', 'Jumlah finishing berhasil dicatat dan masuk ke Packing.');
+        return back()->with('success', 'Jumlah tugas Harian berhasil dicatat.');
     }
 
     public function cancel(Request $request, FinishingAssignment $finishingAssignment): RedirectResponse

@@ -133,9 +133,6 @@ class PayrollController extends Controller
                 'salary_due' => $salaryType === 'Harian'
                     ? $dailySalaryDue
                     : ($salaryType === 'Borongan' ? $pieceworkSalaryDue : max(round($salaryTotal - $salaryPaid, 2), 0)),
-                'salary_paid_for_type' => $salaryType === 'Harian'
-                    ? $dailySalaryPaid
-                    : ($salaryType === 'Borongan' ? $pieceworkSalaryPaid : $salaryPaid),
                 'cashbond_paid' => round((float) $employee->payrollPayments->sum('cashbond_paid'), 2),
             ];
         }

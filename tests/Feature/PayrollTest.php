@@ -49,7 +49,8 @@ it('deducts cashbond automatically from a salary payment', function () {
     $payrollPage = $this->actingAs($admin)
         ->get(route('admin.payroll.index', ['period' => '2026-11']))
         ->assertSeeText('Rp 150.000')
-        ->assertSeeText('Rp 200.000');
+        ->assertSeeText('Rp 200.000')
+        ->assertDontSee('<th>Sudah Dibayar</th>', false);
     expect(substr_count($payrollPage->getContent(), '<td>Karyawan Payroll</td>'))->toBe(1);
 
     $this->post(route('admin.payroll.pay', $employee), [

@@ -332,6 +332,7 @@ it('blocks Factory piecework production for products allocated to an active Subc
     $this->post(route('order-items.piecework-assignments.store', $orderItem), [
         'employee_id' => $employee->id,
         'target_quantity' => 1,
+        'unit_price' => '25,000',
         'target_deadline' => '2026-11-20',
     ])->assertInvalid([
         'target_quantity' => 'Produk ini sudah dialokasikan ke Subcon dan tidak dapat ditugaskan ke borongan PF.',
@@ -343,6 +344,302 @@ it('blocks Factory piecework production for products allocated to an active Subc
     $this->assertDatabaseCount('piecework_items', 0);
     $this->assertDatabaseCount('piecework_assignments', 0);
     expect((int) $orderItem->fresh()->qty_completed)->toBe(0);
+});
+
+it('assigns multiple order products to one Factory employee in a single form', function () {
+    $this->travelTo('2026-11-16 13:00:00');
+    $admin = User::factory()->factoryAdmin()->create();
+    $employee = Employee::factory()->create([
+        'full_name' => 'Multi Product Worker',
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+        'started_at' => '2026-11-02',
+    ]);
+    $guest = Guest::create(['name' => 'Multi Product Piecework Guest']);
+    $order = Order::create([
+        'order_id' => 'SPK-PIECEWORK-MULTI',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 1000,
+        'deadline' => '2026-11-30',
+        'factory_deadline' => '2026-11-25',
+        'status' => 'Proses Produksi',
+    ]);
+    $chair = $order->items()->create([
+        'product' => 'Multi Chair',
+        'qty' => 6,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/multi-chair.png',
+    ]);
+    $table = $order->items()->create([
+        'product' => 'Multi Table',
+        'qty' => 4,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/multi-table.png',
+    ]);
+    $factoryDeadline = $order->fresh()->factory_deadline;
+    $chairDeadline = $factoryDeadline->copy()->subDays(2)->toDateString();
+    $tableDeadline = $factoryDeadline->copy()->subDay()->toDateString();
+
+    $this->actingAs($admin)
+        ->get(route('orders.show', $order))
+        ->assertSee('data-factory-piecework-assignment-form', false)
+        ->assertSee('data-factory-piecework-add', false)
+        ->assertSee('data-deadline-days', false)
+        ->assertSee('name="assignments[0][unit_price]"', false)
+        ->assertSee('max="'.$factoryDeadline->toDateString().'"', false)
+        ->assertSeeText('Multi Chair')
+        ->assertSeeText('Multi Table')
+        ->assertDontSee(route('order-items.piecework-assignments.store', $chair), false)
+        ->assertDontSee(route('order-items.piecework-assignments.store', $table), false);
+
+    $this->from(route('orders.show', $order))
+        ->post(route('orders.piecework-assignments.store', $order), [
+            'employee_id' => $employee->id,
+            'assignments' => [[
+                'order_item_id' => $chair->id,
+                'target_quantity' => 3,
+                'target_deadline' => $chairDeadline,
+            ]],
+        ])
+        ->assertSessionHasErrors('assignments.0.unit_price');
+    $this->assertDatabaseCount('piecework_assignments', 0);
+
+    $this->post(route('orders.piecework-assignments.store', $order), [
+        'employee_id' => $employee->id,
+        'assignments' => [
+            [
+                'order_item_id' => $chair->id,
+                'target_quantity' => 3,
+                'unit_price' => '25,000',
+                'target_deadline' => $chairDeadline,
+            ],
+            [
+                'order_item_id' => $table->id,
+                'target_quantity' => 2,
+                'unit_price' => '30,000',
+                'target_deadline' => $tableDeadline,
+            ],
+        ],
+    ])->assertRedirect(route('orders.show', $order))
+        ->assertSessionHas('success', 'Penugasan borongan berhasil ditambahkan.');
+
+    $this->assertDatabaseCount('piecework_assignments', 2);
+    $this->assertDatabaseHas('piecework_assignments', [
+        'employee_id' => $employee->id,
+        'order_item_id' => $chair->id,
+        'target_quantity' => 3,
+        'unit_price' => 25000,
+        'target_deadline' => $chairDeadline.' 00:00:00',
+    ]);
+    $this->assertDatabaseHas('piecework_assignments', [
+        'employee_id' => $employee->id,
+        'order_item_id' => $table->id,
+        'target_quantity' => 2,
+        'unit_price' => 30000,
+        'target_deadline' => $tableDeadline.' 00:00:00',
+    ]);
+});
+
+it('records Factory piecework earnings at the assigned unit price', function () {
+    $this->travelTo('2026-11-20 13:00:00');
+    $admin = User::factory()->factoryAdmin()->create();
+    $employee = Employee::factory()->create([
+        'full_name' => 'Factory Piecework Worker',
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+        'started_at' => '2026-11-02',
+    ]);
+    $guest = Guest::create(['name' => 'Factory Payroll Guest']);
+    $order = Order::create([
+        'order_id' => 'SPK-FACTORY-PIECEWORK-PAYROLL',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 1000,
+        'factory_deadline' => '2026-11-23',
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Factory Payroll Chair',
+        'qty' => 5,
+        'price' => 200,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Siap Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/payroll-chair.png',
+    ]);
+
+    $this->actingAs($admin)
+        ->post(route('orders.piecework-assignments.store', $order), [
+            'employee_id' => $employee->id,
+            'assignments' => [[
+                'order_item_id' => $item->id,
+                'target_quantity' => 3,
+                'unit_price' => '25,000',
+                'target_deadline' => '2026-11-23',
+            ]],
+        ])
+        ->assertRedirect(route('orders.show', $order));
+
+    $assignment = PieceworkAssignment::query()->firstOrFail();
+    $this->assertDatabaseHas('piecework_assignments', [
+        'id' => $assignment->id,
+        'unit_price' => 25000,
+    ]);
+
+    $this->patch(route('piecework-assignments.complete', $assignment), [
+        'quantity' => 3,
+        'note' => 'Tiga kursi selesai.',
+    ])->assertRedirect(route('orders.show', $order));
+
+    $this->assertDatabaseHas('piecework_items', [
+        'employee_id' => $employee->id,
+        'order_item_id' => $item->id,
+        'piecework_assignment_id' => $assignment->id,
+        'quantity' => 3,
+        'unit_price' => 25000,
+        'line_total' => 75000,
+    ]);
+    $this->get(route('admin.payroll.index', ['period' => '2026-11', 'salary_type' => 'Borongan']))
+        ->assertSeeText('Rp 75.000');
+});
+
+it('adds unpaid legacy Factory assignment completions to payroll when their rate is entered', function () {
+    $this->travelTo('2026-11-20 13:00:00');
+    $admin = User::factory()->factoryAdmin()->create();
+    $employee = Employee::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+        'started_at' => '2026-11-02',
+    ]);
+    $guest = Guest::create(['name' => 'Legacy Factory Payroll Guest']);
+    $order = Order::create([
+        'order_id' => 'SPK-FACTORY-LEGACY-PAYROLL',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 1000,
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Legacy Factory Payroll Chair',
+        'qty' => 10,
+        'qty_completed' => 10,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Finishing',
+        'factory_status' => 'Finishing',
+    ]);
+    $assignment = PieceworkAssignment::create([
+        'employee_id' => $employee->id,
+        'order_item_id' => $item->id,
+        'assigned_by_id' => $admin->id,
+        'completed_by_id' => $admin->id,
+        'product_name' => $item->product,
+        'target_quantity' => 10,
+        'completed_quantity' => 10,
+        'unit_price' => null,
+        'target_deadline' => '2026-11-20',
+        'completed_at' => now(),
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('orders.show', $order))
+        ->assertSeeText('Catat upah borongan');
+
+    $this->patch(route('piecework-assignments.rate.update', $assignment), [
+        'unit_price' => '15,000',
+    ])->assertRedirect(route('orders.show', $order));
+
+    $this->assertDatabaseHas('piecework_assignments', [
+        'id' => $assignment->id,
+        'completed_quantity' => 0,
+        'unit_price' => 15000,
+    ]);
+    $this->assertDatabaseHas('piecework_items', [
+        'employee_id' => $employee->id,
+        'order_item_id' => $item->id,
+        'piecework_assignment_id' => $assignment->id,
+        'quantity' => 10,
+        'unit_price' => 15000,
+        'line_total' => 150000,
+    ]);
+    $this->get(route('admin.payroll.index', ['period' => '2026-11', 'salary_type' => 'Borongan']))
+        ->assertSeeText('Rp 150.000');
+
+    $this->patch(route('piecework-assignments.rate.update', $assignment), [
+        'unit_price' => '15,000',
+    ])->assertSessionHasErrors('unit_price');
+    $this->assertDatabaseCount('piecework_items', 1);
+});
+
+it('rolls back all Factory piecework assignments when a product deadline exceeds its order deadline', function () {
+    $this->travelTo('2026-11-16 13:00:00');
+    $admin = User::factory()->factoryAdmin()->create();
+    $employee = Employee::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+        'started_at' => '2026-11-02',
+    ]);
+    $guest = Guest::create(['name' => 'Overdue Multi Product Guest']);
+    $order = Order::create([
+        'order_id' => 'SPK-PIECEWORK-DEADLINE',
+        'guest_id' => $guest->id,
+        'guest_name' => $guest->name,
+        'total_order' => 1000,
+        'deadline' => '2026-11-30',
+        'factory_deadline' => '2026-11-25',
+        'status' => 'Proses Produksi',
+    ]);
+    $chair = $order->items()->create([
+        'product' => 'Deadline Chair',
+        'qty' => 6,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/deadline-chair.png',
+    ]);
+    $table = $order->items()->create([
+        'product' => 'Deadline Table',
+        'qty' => 4,
+        'price' => 100,
+        'source' => 'Order',
+        'status' => 'Produksi',
+        'factory_status' => 'Produksi',
+        'factory_drawing_image' => 'orders/factory-drawings/deadline-table.png',
+    ]);
+    $factoryDeadline = $order->fresh()->factory_deadline;
+    $validDeadline = $factoryDeadline->toDateString();
+    $invalidDeadline = $factoryDeadline->copy()->addDay()->toDateString();
+
+    $this->actingAs($admin)
+        ->post(route('orders.piecework-assignments.store', $order), [
+            'employee_id' => $employee->id,
+            'assignments' => [
+                [
+                    'order_item_id' => $chair->id,
+                    'target_quantity' => 3,
+                    'unit_price' => '25,000',
+                    'target_deadline' => $validDeadline,
+                ],
+                [
+                    'order_item_id' => $table->id,
+                    'target_quantity' => 2,
+                    'unit_price' => '30,000',
+                    'target_deadline' => $invalidDeadline,
+                ],
+            ],
+        ])->assertInvalid([
+            'assignments.1.target_deadline' => 'Deadline penugasan borongan tidak boleh melebihi deadline order ('.$factoryDeadline->format('d/m/Y').').',
+        ]);
+
+    $this->assertDatabaseCount('piecework_assignments', 0);
 });
 
 it('assigns a single SPK product across factory employees without exceeding its order quantity', function () {
@@ -700,9 +997,15 @@ it('keeps partially completed and cancelled Borongan quantities open until the r
     ])->assertRedirect();
     $this->assertDatabaseHas('piecework_assignments', [
         'id' => $assignment->id,
-        'completed_quantity' => 3,
+        'completed_quantity' => 0,
         'completion_note' => 'Tiga meja sudah diselesaikan.',
         'completed_at' => null,
+    ]);
+    $this->assertDatabaseHas('piecework_items', [
+        'piecework_assignment_id' => $assignment->id,
+        'quantity' => 3,
+        'unit_price' => 10000,
+        'line_total' => 30000,
     ]);
 
     $this->post(route('admin.employees.piecework-production.store', $employee), [
@@ -736,15 +1039,20 @@ it('keeps partially completed and cancelled Borongan quantities open until the r
     ])->assertRedirect();
     $this->assertDatabaseHas('piecework_assignments', [
         'id' => $assignment->id,
-        'completed_quantity' => 6,
+        'completed_quantity' => 0,
         'completed_by_id' => $admin->id,
         'completion_note' => 'Sisa pekerjaan diselesaikan.',
         'cancelled_quantity' => 2,
     ]);
     expect($assignment->fresh()->completed_at)->not->toBeNull();
+    expect((float) PieceworkItem::query()
+        ->where('piecework_assignment_id', $assignment->id)
+        ->sum('line_total'))->toBe(60000.0);
+    $this->get(route('admin.payroll.index', ['period' => '2026-11', 'salary_type' => 'Borongan']))
+        ->assertSeeText('Rp 60.000');
 });
 
-it('requires a completion note and prevents completing more than the remaining Borongan quantity', function () {
+it('allows Borongan completion without a note and prevents exceeding the remaining quantity', function () {
     $admin = User::factory()->admin()->create();
     $employee = Employee::factory()->create([
         'business_unit' => User::UNIT_BALI,
@@ -755,13 +1063,23 @@ it('requires a completion note and prevents completing more than the remaining B
         'assigned_by_id' => $admin->id,
         'product_name' => 'Kursi',
         'target_quantity' => 4,
+        'unit_price' => 10000,
         'target_deadline' => '2026-11-20',
     ]);
     $this->actingAs($admin);
 
     $this->patch(route('admin.piecework-assignments.complete', $assignment), [
         'quantity' => 2,
-    ])->assertSessionHasErrors('note');
+    ])->assertRedirect();
+    $this->assertDatabaseHas('piecework_assignments', [
+        'id' => $assignment->id,
+        'completion_note' => null,
+        'completed_at' => null,
+    ]);
+    $this->assertDatabaseHas('piecework_items', [
+        'piecework_assignment_id' => $assignment->id,
+        'quantity' => 2,
+    ]);
 
     $this->patch(route('admin.piecework-assignments.complete', $assignment), [
         'quantity' => 5,

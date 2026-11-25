@@ -109,7 +109,8 @@ test('revenue uses receipt dates and separates historic balances from dated cash
         ->assertViewHas('cashbondAdvanceTotal', 50000.0)
         ->assertViewHas('totalOutgoing', 550000.0)
         ->assertViewHas('netCashFlow', -330000.0)
-        ->assertViewHas('openingPaidAmount', 300000.0);
+        ->assertViewHas('openingPaidAmount', 300000.0)
+        ->assertDontSee(route('orders.show', $order), false);
 
     $this->actingAs($admin)
         ->get(route('revenue.index', [
@@ -147,6 +148,118 @@ test('a payment received on the selected final date is included in order revenue
         ->assertSeeText('Cicilan hari ini')
         ->assertViewHas('orderRevenue', 100000.0)
         ->assertViewHas('totalIncoming', 100000.0);
+});
+
+test('revenue transaction details link to related records when the user has access', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    $admin = User::factory()->admin()->create([
+        'accessible_menus' => ['expenses', 'materials', 'orders', 'revenue'],
+    ]);
+    $order = Order::create([
+        'order_id' => 'REVENUE-DETAIL-ORDER',
+        'guest_name' => 'Revenue Detail Guest',
+        'total_order' => 100000,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->payments()->create([
+        'amount' => 25000,
+        'paid_at' => '2026-11-18',
+    ]);
+    $expense = Expense::factory()->create([
+        'business_unit' => User::UNIT_BALI,
+        'description' => 'Linked Expense',
+        'occurred_at' => '2026-11-18',
+    ]);
+    $material = Material::factory()->create([
+        'business_unit' => User::UNIT_BALI,
+        'name' => 'Linked Material',
+    ]);
+    $material->transactions()->create([
+        'type' => 'in',
+        'quantity' => 1,
+        'unit_price' => 10000,
+        'occurred_at' => '2026-11-18 10:00:00',
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('revenue.index', [
+            'from' => '2026-11-01',
+            'to' => '2026-11-30',
+        ]))
+        ->assertSee(route('orders.show', $order), false)
+        ->assertSee(route('expenses.show', $expense), false)
+        ->assertSee(route('materials.show', $material), false);
+});
+
+test('PF revenue transactions do not expose guest details', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['revenue'],
+    ]);
+    $order = Order::create([
+        'order_id' => 'PF-REVENUE-PRIVACY',
+        'guest_name' => 'Private PF Guest Name',
+        'total_order' => 100000,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->items()->create([
+        'product' => 'PF Revenue Product',
+        'qty' => 1,
+        'price' => 50000,
+        'source' => 'Order',
+        'factory_sale_price' => 75000,
+        'factory_handover_at' => '2026-11-18 10:00:00',
+        'status' => 'Ready',
+        'factory_status' => 'Proses Kirim',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('revenue.index', [
+            'from' => '2026-11-01',
+            'to' => '2026-11-30',
+        ]))
+        ->assertSeeText('PF-REVENUE-PRIVACY')
+        ->assertSeeText('Pilar Bali')
+        ->assertDontSeeText('Private PF Guest Name');
+});
+
+test('PF order value is shown separately from sales for quantities accepted by PB', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    $factoryAdmin = User::factory()->factoryAdmin()->create([
+        'accessible_menus' => ['revenue'],
+    ]);
+    $order = Order::create([
+        'order_id' => 'PF-ORDER-VALUE-VS-REALIZED',
+        'guest_name' => 'Private Guest',
+        'total_order' => 500000,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->items()->create([
+        'product' => 'PF Revenue Product',
+        'qty' => 10,
+        'price' => 50000,
+        'source' => 'Order',
+        'factory_sale_price' => 10000,
+        'factory_handover_at' => '2026-11-15 10:00:00',
+        'pb_accepted_at' => '2026-11-18 09:00:00',
+        'quality_good_quantity' => 4,
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Proses Kirim',
+    ]);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('revenue.index', [
+            'from' => '2026-11-01',
+            'to' => '2026-11-30',
+        ]))
+        ->assertSeeText('Nilai order PF ke PB')
+        ->assertSeeText('Penjualan PF ke PB')
+        ->assertSeeText('PF-ORDER-VALUE-VS-REALIZED')
+        ->assertDontSeeText('Private Guest')
+        ->assertViewHas('factoryOrderValueTotal', 100000.0)
+        ->assertViewHas('factorySaleTotal', 40000.0)
+        ->assertViewHas('factoryNetRevenue', 40000.0)
+        ->assertViewHas('totalIncoming', 0.0);
 });
 
 test('revenue report only shows transactions from the active business unit', function () {
@@ -223,4 +336,72 @@ test('revenue date range rejects an end date before the start date', function ()
             'to' => '2026-11-01',
         ]))
         ->assertSessionHasErrors('to');
+});
+
+test('owners can see consolidated finances without double counting PF sales to PB', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    $owner = User::factory()->owner()->create();
+    $order = Order::create([
+        'order_id' => 'CONSOLIDATED-FINANCE-ORDER',
+        'guest_name' => 'Consolidated Finance Guest',
+        'total_order' => 10000,
+        'status' => 'Proses Produksi',
+    ]);
+    $order->payments()->create([
+        'amount' => 10000,
+        'paid_at' => '2026-11-18',
+    ]);
+    $order->items()->create([
+        'product' => 'Consolidated Finance Product',
+        'qty' => 2,
+        'price' => 5000,
+        'source' => 'Order',
+        'factory_sale_price' => 5000,
+        'factory_price_set_at' => '2026-11-15 10:00:00',
+        'factory_handover_at' => '2026-11-16 10:00:00',
+        'pb_accepted_at' => '2026-11-18 09:00:00',
+        'quality_good_quantity' => 1,
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Proses Kirim',
+    ]);
+    Expense::factory()->create([
+        'business_unit' => User::UNIT_BALI,
+        'description' => 'Consolidated PB expense',
+        'total' => 1000,
+        'occurred_at' => '2026-11-18',
+    ]);
+    Expense::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'description' => 'Consolidated PF expense',
+        'total' => 2000,
+        'occurred_at' => '2026-11-18',
+    ]);
+
+    $this->actingAs($owner)
+        ->get(route('revenue.index', [
+            'from' => '2026-11-01',
+            'to' => '2026-11-30',
+            'view' => 'combined',
+        ]))
+        ->assertSeeText('Gabungan PB + PF')
+        ->assertSeeText('Penjualan internal PF ke PB')
+        ->assertSeeText('CONSOLIDATED-FINANCE-ORDER')
+        ->assertViewHas('orderRevenue', 10000.0)
+        ->assertViewHas('factoryOrderValueTotal', 10000.0)
+        ->assertViewHas('factorySaleTotal', 5000.0)
+        ->assertViewHas('totalIncoming', 10000.0)
+        ->assertViewHas('totalOutgoing', 3000.0)
+        ->assertViewHas('netCashFlow', 7000.0)
+        ->assertViewHas('unitSummaries', function (array $summaries): bool {
+            return $summaries[User::UNIT_BALI]['net'] === 9000.0
+                && $summaries[User::UNIT_FACTORY]['net'] === 3000.0;
+        });
+});
+
+test('non-owners cannot access the consolidated finance view', function () {
+    $admin = User::factory()->admin()->create(['accessible_menus' => ['revenue']]);
+
+    $this->actingAs($admin)
+        ->get(route('revenue.index', ['view' => 'combined']))
+        ->assertForbidden();
 });

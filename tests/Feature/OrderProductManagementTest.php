@@ -1,9 +1,12 @@
 <?php
 
+use App\Models\Employee;
+use App\Models\FinishingAssignment;
 use App\Models\Guest;
 use App\Models\Order;
 use App\Models\OrderComment;
-use App\Models\OrderItemService;
+use App\Models\Product;
+use App\Models\ProductStock;
 use App\Models\Subcontractor;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -37,7 +40,7 @@ test('Factory users cannot bypass production workflow through legacy status endp
         'price' => 10000,
         'source' => 'Order',
         'status' => 'Produksi',
-        'factory_status' => 'Produksi',
+        'factory_status' => 'None',
     ]);
 
     $this->actingAs($factoryAdmin)
@@ -51,9 +54,9 @@ test('Factory users cannot bypass production workflow through legacy status endp
 
     $this->patch(route('order-products.update', $item), [
         'items' => [
-            $item->id => ['status' => 'Proses Kirim', 'qty_completed' => 2],
+            $item->id => ['status' => 'Produksi', 'qty_completed' => 2],
         ],
-    ])->assertForbidden();
+    ])->assertSessionHasErrors("items.{$item->id}.status");
 
     $this->assertDatabaseHas('orders', [
         'id' => $order->id,
@@ -62,7 +65,7 @@ test('Factory users cannot bypass production workflow through legacy status endp
     $this->assertDatabaseHas('order_items', [
         'id' => $item->id,
         'status' => 'Produksi',
-        'factory_status' => 'Produksi',
+        'factory_status' => 'None',
         'qty_completed' => 0,
     ]);
 });
@@ -77,8 +80,13 @@ test('order detail requires a new status photo and saves it without replacing th
         'guest_name' => $guest->name,
         'status' => 'None',
     ]);
+    $catalogProduct = Product::factory()->create([
+        'name' => 'Status Photo Chair',
+        'mockup' => 'catalog/mockups/status-photo-chair.png',
+    ]);
     $item = $order->items()->create([
         'product' => 'Status Photo Chair',
+        'product_id' => $catalogProduct->id,
         'qty' => 1,
         'price' => 10000,
         'source' => 'Order',
@@ -118,7 +126,14 @@ test('order detail requires a new status photo and saves it without replacing th
         Storage::disk('public')->assertExists($statusImage);
     }
     $this->get(route('orders.show', $order))
-        ->assertSee('alt="Mockup Status Photo Chair"', false);
+        ->assertSee('alt="Foto produk Status Photo Chair"', false)
+        ->assertSee('alt="Foto order Status Photo Chair"', false);
+    $this->get(route('orders.edit', $order))
+        ->assertDontSee('alt="Foto produk Status Photo Chair"', false)
+        ->assertDontSee('alt="Foto order Status Photo Chair"', false)
+        ->assertSee('alt="Mockup Status Photo Chair"', false)
+        ->assertDontSee(asset('storage/orders/products/product.jpg'), false)
+        ->assertSee('aria-label="Hapus foto PB 1 Status Photo Chair"', false);
 });
 
 test('product queue requires a photo before moving a product to distribution', function () {
@@ -315,7 +330,7 @@ test('Factory product queue requires the second work drawing uploaded from order
 
     $this->get(route('orders.show', $order))
         ->assertSeeText('New')
-        ->assertSeeText('Unggah gambar kerja tukang PF')
+        ->assertSeeText('Unggah gambar kerja PF')
         ->assertSee('name="factory_drawing_image"', false)
         ->assertSee('name="factory_sale_price"', false);
 
@@ -387,6 +402,16 @@ test('Factory work queue includes production and packing but excludes Bali-only 
 test('Stock products bypass Factory and enter the PB queue for readiness checks', function () {
     $salesAdmin = User::factory()->admin()->create();
     $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $product = Product::factory()->create([
+        'name' => 'Stock Dining Chair',
+        'dimensions' => '10x10x10',
+        'factory_sale_price' => 5000,
+    ]);
+    ProductStock::create([
+        'product_id' => $product->id,
+        'business_unit' => User::UNIT_BALI,
+        'quantity' => 2,
+    ]);
 
     $this->actingAs($salesAdmin)
         ->post(route('orders.store'), [
@@ -397,6 +422,7 @@ test('Stock products bypass Factory and enter the PB queue for readiness checks'
             'status' => 'None',
             'items' => [[
                 'product' => 'Stock Dining Chair',
+                'product_id' => $product->id,
                 'dimensions' => '10x10x10',
                 'qty' => 2,
                 'price' => 10000,
@@ -420,6 +446,7 @@ test('Stock products bypass Factory and enter the PB queue for readiness checks'
         ->assertSee('data-stock-quality-result="Kurang"', false)
         ->assertSee('data-stock-quality-dialog', false)
         ->assertSee('data-stock-quality-severity', false)
+        ->assertSee('data-stock-quality-evidence', false)
         ->assertSeeText('Semua')
         ->assertDontSee('name="items['.$item->id.'][status]"', false)
         ->assertDontSee('name="items['.$item->id.'][status_images][]"', false)
@@ -462,9 +489,11 @@ test('Stock products bypass Factory and enter the PB queue for readiness checks'
     expect($item->fresh()->status)->toBe('Ready')
         ->and($item->fresh()->factory_status)->toBe('Ready')
         ->and((int) $item->fresh()->quality_good_quantity)->toBe(2);
+    expect($item->fresh()->pb_accepted_at)->not->toBeNull();
 });
 
 test('Stock products marked short become ready without entering Factory', function () {
+    Storage::fake('public');
     $admin = User::factory()->admin()->create();
     $order = Order::create([
         'order_id' => 'STOCK-SHORT-TO-READY',
@@ -485,6 +514,7 @@ test('Stock products marked short become ready without entering Factory', functi
         ->post(route('order-products.quality.store', $item), [
             'result' => 'Kurang',
             'quantity' => 2,
+            'evidence' => stockProductImage('stock-short.png'),
         ])
         ->assertRedirect();
 
@@ -493,11 +523,184 @@ test('Stock products marked short become ready without entering Factory', functi
         ->and((int) $item->fresh()->quality_short_quantity)->toBe(2);
 });
 
-test('Stock products marked damaged enter Service before the Factory queue', function () {
+test('damaged and short QC results require photo evidence and save it to the order history', function () {
+    Storage::fake('public');
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'QC-PHOTO-EVIDENCE',
+        'guest_name' => 'QC Photo Guest',
+        'total_order' => 30000,
+        'status' => 'Dalam Perjalanan',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'QC Photo Chair',
+        'qty' => 3,
+        'qty_completed' => 3,
+        'packed_quantity' => 3,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Proses Kirim',
+        'factory_handover_at' => now()->subDay(),
+    ]);
+
+    $this->actingAs($admin)
+        ->post(route('order-products.quality.store', $item), [
+            'result' => 'Rusak',
+            'quantity' => 1,
+        ])
+        ->assertSessionHasErrors('evidence');
+
+    $this->post(route('order-products.quality.store', $item), [
+        'result' => 'Kurang',
+        'quantity' => 1,
+    ])->assertSessionHasErrors('evidence');
+
+    $this->assertDatabaseCount('order_events', 0);
+
+    $this->post(route('order-products.quality.store', $item), [
+        'result' => 'Rusak',
+        'quantity' => 1,
+        'evidence' => stockProductImage('qc-damage-evidence.png'),
+    ])->assertRedirect();
+
+    $qualityEvent = $order->events()
+        ->where('type', 'item_quality_checked')
+        ->firstOrFail();
+    Storage::disk('public')->assertExists($qualityEvent->image_path);
+
+    $this->get(route('orders.show', $order))
+        ->assertDontSeeText('Bukti foto QC/Service (1)');
+    $this->get(route('orders.edit', $order))
+        ->assertDontSee('alt="Bukti QC/Service QC Photo Chair"', false)
+        ->assertDontSeeText('Lihat foto QC');
+
+    $goodItem = $order->items()->create([
+        'product' => 'Good QC Photo Chair',
+        'qty' => 1,
+        'qty_completed' => 1,
+        'packed_quantity' => 1,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Proses Kirim',
+        'factory_handover_at' => now()->subDay(),
+    ]);
+
+    $this->post(route('order-products.quality.store', $goodItem), [
+        'result' => 'Bagus',
+        'quantity' => 1,
+        'evidence' => stockProductImage('qc-good-evidence.png'),
+    ])->assertRedirect();
+
+    $goodQualityEvent = $order->events()
+        ->where('order_item_id', $goodItem->id)
+        ->where('type', 'item_quality_checked')
+        ->firstOrFail();
+    Storage::disk('public')->assertExists($goodQualityEvent->image_path);
+});
+
+test('PB sees a printable customer receipt while received-good progress stays in edit order', function () {
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'CUSTOMER-RECEIPT-ORDER',
+        'guest_name' => 'Receipt Customer',
+        'phone' => '08123456789',
+        'order_type' => 'Bali',
+        'total_order' => 200000,
+        'paid_amount' => 50000,
+        'status' => 'Dalam Perjalanan',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Receipt Dining Table',
+        'qty' => 10,
+        'qty_completed' => 10,
+        'packed_quantity' => 6,
+        'quality_good_quantity' => 4,
+        'price' => 20000,
+        'source' => 'Order',
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Proses Kirim',
+        'factory_handover_at' => now()->subDay(),
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('orders.show', $order))
+        ->assertSeeText('Nota Pesanan')
+        ->assertSeeText('Receipt Customer')
+        ->assertSeeText('Receipt Dining Table')
+        ->assertSeeText('Rp 200.000')
+        ->assertSee('onclick="window.print()"', false)
+        ->assertDontSeeText('Sudah diterima bagus')
+        ->assertDontSeeText('Diskusi Order')
+        ->assertDontSee('data-order-product-status-filter', false)
+        ->assertDontSee('Ajukan cancel seluruh order', false);
+
+    $this->get(route('orders.edit', $order))
+        ->assertSeeText('Sudah diterima bagus: 4 unit')
+        ->assertSeeText('Belum diterima bagus: 6 unit')
+        ->assertSeeText('Diskusi Order')
+        ->assertSeeText('Permintaan Pembatalan Produk');
+});
+
+test('Service results sent back to PF require and retain photo evidence', function () {
+    Storage::fake('public');
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'SERVICE-PHOTO-EVIDENCE',
+        'guest_name' => 'Service Photo Guest',
+        'total_order' => 10000,
+        'status' => 'Proses Produksi',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Service Photo Chair',
+        'qty' => 1,
+        'price' => 10000,
+        'source' => 'Stock',
+        'status' => 'Produksi',
+        'factory_status' => 'Service',
+    ]);
+    $service = $item->services()->create([
+        'quantity' => 1,
+        'status' => 'Service',
+        'severity' => 'Parah',
+    ]);
+
+    $this->actingAs($admin)
+        ->post(route('order-item-services.result.store', $service), [
+            'result' => 'Rusak',
+            'quantity' => 1,
+        ])
+        ->assertSessionHasErrors('evidence');
+
+    expect($service->fresh()->status)->toBe('Service');
+
+    $this->post(route('order-item-services.result.store', $service), [
+        'result' => 'Rusak',
+        'quantity' => 1,
+        'evidence' => stockProductImage('service-damage-evidence.png'),
+    ])->assertRedirect();
+
+    $serviceEvent = $order->events()
+        ->where('type', 'item_service_result_recorded')
+        ->firstOrFail();
+    Storage::disk('public')->assertExists($serviceEvent->image_path);
+});
+
+test('damaged Stock products enter PF Service and are assigned to Harian without a drawing', function () {
     Storage::fake('public');
     $admin = User::factory()->admin()->create();
     $factoryAdmin = User::factory()->factoryAdmin()->create([
-        'accessible_menus' => ['orders', 'order_products', 'attendance', 'subcontractors'],
+        'accessible_menus' => ['orders', 'order_products', 'subcontractors', 'attendance'],
+    ]);
+    $subcontractor = Subcontractor::factory()->create();
+    $pieceworkEmployee = Employee::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Borongan',
+    ]);
+    $dailyEmployee = Employee::factory()->create([
+        'business_unit' => User::UNIT_FACTORY,
+        'employee_type' => 'Harian',
     ]);
     $order = Order::create([
         'order_id' => 'STOCK-DAMAGED-TO-PF',
@@ -518,6 +721,7 @@ test('Stock products marked damaged enter Service before the Factory queue', fun
         ->post(route('order-products.quality.store', $item), [
             'result' => 'Rusak',
             'quantity' => 2,
+            'evidence' => stockProductImage('stock-damaged-missing-severity.png'),
         ])
         ->assertSessionHasErrors('severity');
 
@@ -529,117 +733,75 @@ test('Stock products marked damaged enter Service before the Factory queue', fun
             'result' => 'Rusak',
             'quantity' => 2,
             'severity' => 'Ringan',
+            'evidence' => stockProductImage('stock-damaged.png'),
         ])
         ->assertRedirect();
 
-    expect($item->fresh()->status)->toBe('Distribusi')
-        ->and($item->fresh()->factory_status)->toBe('None')
-        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(0)
-        ->and((int) $item->fresh()->service_quantity)->toBe(2);
-
-    $service = OrderItemService::query()->where('order_item_id', $item->id)->firstOrFail();
+    expect($item->fresh()->status)->toBe('Produksi')
+        ->and($item->fresh()->factory_status)->toBe('Service')
+        ->and($item->fresh()->factory_drawing_image)->toBeNull()
+        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(2)
+        ->and((int) $item->fresh()->service_quantity)->toBe(0)
+        ->and($order->fresh()->status)->toBe('Proses Produksi');
     $this->assertDatabaseHas('order_item_services', [
-        'id' => $service->id,
+        'order_item_id' => $item->id,
         'quantity' => 2,
-        'status' => 'Service',
+        'status' => 'Produksi',
         'severity' => 'Ringan',
     ]);
 
     $this->actingAs($factoryAdmin)
-        ->post(route('order-item-services.result.store', $service), [
-            'result' => 'Bagus',
-            'quantity' => 1,
-        ])
-        ->assertForbidden();
-
-    $this->actingAs($admin)
-        ->from(route('order-products.index'))
-        ->post(route('order-item-services.result.store', $service), [
-            'result' => 'Rusak',
-            'quantity' => 3,
-        ])
-        ->assertSessionHasErrors('quantity');
-
-    expect($service->fresh()->status)->toBe('Service')
-        ->and((int) $service->fresh()->quantity)->toBe(2);
-
-    $this->actingAs($factoryAdmin)
-        ->get(route('order-products.index'))
-        ->assertDontSeeText('Stock Damaged Chair');
-
-    $this->actingAs($admin)
-        ->get(route('order-products.index'))
-        ->assertSeeText('Service Ringan · 2 unit')
-        ->assertSeeText('Bagus')
-        ->assertSeeText('Rusak');
-
-    $this->post(route('order-item-services.result.store', $service), [
-        'result' => 'Rusak',
-        'quantity' => 1,
-    ])->assertRedirect();
-
-    expect($item->fresh()->status)->toBe('Produksi')
-        ->and($item->fresh()->factory_status)->toBe('None')
-        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(1)
-        ->and((int) $item->fresh()->service_quantity)->toBe(1)
-        ->and($service->fresh()->status)->toBe('Produksi')
-        ->and($service->fresh()->severity)->toBe('Parah');
-
-    $pendingService = OrderItemService::query()
-        ->where('order_item_id', $item->id)
-        ->where('status', 'Service')
-        ->firstOrFail();
-    expect($pendingService->severity)->toBe('Ringan');
-
-    $this->actingAs($factoryAdmin)
         ->get(route('order-products.index'))
         ->assertSeeText('Stock Damaged Chair')
-        ->assertSeeText('New')
-        ->assertSeeText('Unggah gambar kerja tukang');
+        ->assertSeeText('Service')
+        ->assertSeeText('Gambar PF (opsional untuk Service)');
+    $this->get(route('admin.attendance.index', ['work_type' => 'Harian']))
+        ->assertSeeText('Stock Damaged Chair')
+        ->assertSeeText('Service 2 unit');
 
-    $this->from(route('order-products.index'))
-        ->patch(route('order-products.factory-drawing.update', $item), [
-            'factory_drawing_image' => stockProductImage('stock-factory-drawing.png'),
+    $this->actingAs($factoryAdmin)
+        ->post(route('order-items.piecework-assignments.store', $item), [
+            'employee_id' => $pieceworkEmployee->id,
+            'target_quantity' => 1,
+            'unit_price' => '25,000',
+            'target_deadline' => now()->addDay()->toDateString(),
         ])
-        ->assertRedirect(route('order-products.index'));
+        ->assertSessionHasErrors('target_quantity');
+    $this->post(route('admin.finishing-assignments.store'), [
+        'employee_id' => $pieceworkEmployee->id,
+        'order_item_id' => $item->id,
+        'target_quantity' => 1,
+        'is_rework' => 1,
+    ])->assertNotFound();
 
-    $subcontractor = Subcontractor::factory()->create();
     $this->post(route('order-products.subcontractor-assignments.store', $item), [
         'subcontractor_id' => $subcontractor->id,
         'quantity' => 1,
     ])->assertSessionHasErrors('subcontractor_id');
 
-    $this->actingAs($admin)
-        ->post(route('order-item-services.result.store', $pendingService), [
-            'result' => 'Bagus',
-            'quantity' => 1,
-        ])
-        ->assertRedirect();
-
-    expect($item->fresh()->status)->toBe('Produksi')
-        ->and((int) $item->fresh()->quality_good_quantity)->toBe(1)
-        ->and((int) $item->fresh()->service_quantity)->toBe(0);
-
     $this->actingAs($factoryAdmin)
-        ->post(route('order-products.subcontractor-assignments.store', $item), [
-            'subcontractor_id' => $subcontractor->id,
-            'quantity' => 1,
+        ->post(route('admin.finishing-assignments.store'), [
+            'employee_id' => $dailyEmployee->id,
+            'order_item_id' => $item->id,
+            'target_quantity' => 2,
+            'is_rework' => 1,
         ])
         ->assertRedirect();
 
-    expect($item->activeSubcontractorAssignments()->sum('assigned_quantity'))->toBe(1);
+    $assignment = FinishingAssignment::query()->firstOrFail();
+    $this->patch(route('admin.finishing-assignments.complete', $assignment), [
+        'quantity' => 2,
+        'note' => 'Service selesai',
+    ])->assertRedirect();
 
-    $this->actingAs($admin)
-        ->get(route('orders.show', $order))
-        ->assertSeeText('Selesai (1 unit)')
-        ->assertSeeText('Produksi (1 unit)')
-        ->assertSeeText('Service (0 unit)');
-
-    expect($item->fresh()->factory_status)->toBe('Produksi')
-        ->and($item->fresh()->factory_drawing_image)->not->toBeNull();
+    expect($item->fresh()->factory_drawing_image)->toBeNull()
+        ->and($item->fresh()->factory_status)->toBe('Proses Kirim')
+        ->and($item->fresh()->status)->toBe('Dalam Perjalanan')
+        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(0);
 });
 
 test('severe Stock damage enters Factory production without local Service', function () {
+    Storage::fake('public');
     $admin = User::factory()->admin()->create();
     $factoryAdmin = User::factory()->factoryAdmin()->create([
         'accessible_menus' => ['orders', 'order_products'],
@@ -664,11 +826,12 @@ test('severe Stock damage enters Factory production without local Service', func
             'result' => 'Rusak',
             'quantity' => 1,
             'severity' => 'Parah',
+            'evidence' => stockProductImage('stock-severe-damage.png'),
         ])
         ->assertRedirect();
 
     expect($item->fresh()->status)->toBe('Produksi')
-        ->and($item->fresh()->factory_status)->toBe('None')
+        ->and($item->fresh()->factory_status)->toBe('Service')
         ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(1)
         ->and((int) $item->fresh()->service_quantity)->toBe(0)
         ->and($order->fresh()->status)->toBe('Proses Produksi');
@@ -683,11 +846,11 @@ test('severe Stock damage enters Factory production without local Service', func
     $this->actingAs($factoryAdmin)
         ->get(route('order-products.index'))
         ->assertSeeText('Severely Damaged Chair')
-        ->assertSeeText('New')
-        ->assertSeeText('Unggah gambar kerja tukang');
+        ->assertSeeText('Service')
+        ->assertSeeText('Gambar PF (opsional untuk Service)');
 });
 
-test('partial Stock QC keeps Service units separate until the service result is recorded', function () {
+test('partial Stock QC keeps damaged units in production until PB inspection is complete', function () {
     Storage::fake('public');
     $admin = User::factory()->admin()->create();
     $factoryAdmin = User::factory()->factoryAdmin()->create([
@@ -713,6 +876,7 @@ test('partial Stock QC keeps Service units separate until the service result is 
             'result' => 'Rusak',
             'quantity' => 3,
             'severity' => 'Ringan',
+            'evidence' => stockProductImage('stock-partial-over-limit.png'),
         ])
         ->assertSessionHasErrors('quantity');
 
@@ -723,18 +887,23 @@ test('partial Stock QC keeps Service units separate until the service result is 
             'result' => 'Rusak',
             'quantity' => 1,
             'severity' => 'Ringan',
+            'evidence' => stockProductImage('stock-partial-damaged.png'),
         ])
         ->assertRedirect();
 
-    expect($item->fresh()->status)->toBe('Distribusi')
-        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(0)
-        ->and((int) $item->fresh()->service_quantity)->toBe(1)
+    expect($item->fresh()->status)->toBe('Produksi')
+        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(1)
+        ->and((int) $item->fresh()->service_quantity)->toBe(0)
         ->and($item->fresh()->quality_unchecked_quantity)->toBe(1);
+
+    $this->get(route('orders.show', $order))
+        ->assertSeeText('Nota Pesanan')
+        ->assertDontSeeText('1 Produksi')
+        ->assertDontSeeText('Service');
 
     $this->get(route('order-products.index'))
         ->assertSeeText('Stock Partial Chair')
-        ->assertSee('data-stock-quality-max="1"', false)
-        ->assertSeeText('Service Ringan · 1 unit');
+        ->assertSee('data-stock-quality-max="1"', false);
 
     $this->actingAs($admin)
         ->post(route('order-products.quality.store', $item), [
@@ -743,30 +912,32 @@ test('partial Stock QC keeps Service units separate until the service result is 
         ])
         ->assertRedirect();
 
-    expect($item->fresh()->status)->toBe('Distribusi')
+    expect($item->fresh()->status)->toBe('Produksi')
         ->and((int) $item->fresh()->quality_good_quantity)->toBe(1)
-        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(0)
-        ->and((int) $item->fresh()->service_quantity)->toBe(1)
+        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(1)
+        ->and((int) $item->fresh()->service_quantity)->toBe(0)
         ->and($item->fresh()->quality_unchecked_quantity)->toBe(0);
 
-    $service = OrderItemService::query()->where('order_item_id', $item->id)->firstOrFail();
+    $this->actingAs($factoryAdmin)
+        ->get(route('order-products.index'))
+        ->assertSeeText('Stock Partial Chair')
+        ->assertSeeText('Gambar PF (opsional untuk Service)');
+
+    $this->patch(route('order-products.factory-drawing.update', $item), [
+        'factory_drawing_image' => stockProductImage('partial-stock-factory-drawing.png'),
+    ])->assertRedirect();
+
+    expect($item->fresh()->factory_status)->toBe('Service')
+        ->and((int) $item->fresh()->quality_good_quantity)->toBe(1)
+        ->and((int) $item->fresh()->quality_damaged_quantity)->toBe(1);
+
     $this->actingAs($admin)
-        ->post(route('order-item-services.result.store', $service), [
-            'result' => 'Bagus',
-            'quantity' => 1,
-        ])
-        ->assertRedirect();
-
-    expect($item->fresh()->status)->toBe('Ready')
-        ->and($item->fresh()->factory_status)->toBe('Ready')
-        ->and((int) $item->fresh()->quality_good_quantity)->toBe(2)
-        ->and((int) $item->fresh()->service_quantity)->toBe(0);
-
-    $this->get(route('orders.show', $order))
-        ->assertSeeText('Selesai (2 unit)')
-        ->assertSeeText('Riwayat Service')
-        ->assertSeeText('Selesai:')
-        ->assertSeeText('1 unit');
+        ->get(route('orders.show', $order))
+        ->assertDontSeeText('1/2 Selesai')
+        ->assertDontSeeText('1 Produksi');
+    $this->get(route('orders.edit', $order))
+        ->assertSeeText('Sudah diterima bagus: 1 unit')
+        ->assertSeeText('Belum diterima bagus: 1 unit');
 });
 
 test('orders cannot remove products that have Service history', function () {
@@ -1282,7 +1453,7 @@ test('Factory users cannot bypass QC to return a distributed product to producti
                 ],
             ],
         ])
-        ->assertForbidden();
+        ->assertSessionHasErrors("items.{$item->id}.status");
 
     $this->assertDatabaseHas('order_items', [
         'id' => $item->id,
@@ -1381,4 +1552,117 @@ test('editing a distributed order item is rejected without changing its producti
         'qty_completed' => 1,
     ]);
     $this->assertDatabaseHas('orders', ['id' => $order->id, 'status' => 'None']);
+});
+
+test('only Pilar Factory can edit production progress in the product queue', function () {
+    $baliAdmin = User::factory()->admin()->create();
+    $factoryAdmin = User::factory()->factoryAdmin()->create();
+    $order = Order::create([
+        'order_id' => 'FACTORY-OWNED-PROGRESS',
+        'guest_name' => 'Factory Progress Guest',
+        'total_order' => 100000,
+        'status' => 'Dalam Perjalanan',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Factory Progress Chair',
+        'qty' => 10,
+        'qty_completed' => 2,
+        'price' => 10000,
+        'factory_sale_price' => 5000,
+        'factory_drawing_image' => 'orders/factory-drawings/factory-progress-chair.png',
+        'source' => 'Order',
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Produksi',
+    ]);
+
+    $this->actingAs($baliAdmin)
+        ->get(route('order-products.index'))
+        ->assertSeeText($item->product)
+        ->assertDontSee('name="items['.$item->id.'][qty_completed]"', false);
+
+    $this->from(route('order-products.index'))
+        ->patch(route('order-products.update', $item), [
+            'items' => [
+                $item->id => [
+                    'status' => 'Dalam Perjalanan',
+                    'qty_completed' => 5,
+                ],
+            ],
+        ])
+        ->assertSessionHasErrors("items.{$item->id}.qty_completed");
+
+    expect((int) $item->fresh()->qty_completed)->toBe(2);
+
+    $this->actingAs($factoryAdmin)
+        ->get(route('order-products.index'))
+        ->assertSeeText($item->product)
+        ->assertSee('name="items['.$item->id.'][qty_completed]"', false);
+
+    $this->from(route('order-products.index'))
+        ->patch(route('order-products.update', $item), [
+            'items' => [
+                $item->id => [
+                    'status' => 'Produksi',
+                    'qty_completed' => 5,
+                ],
+            ],
+        ])
+        ->assertRedirect();
+
+    expect((int) $item->fresh()->qty_completed)->toBe(5);
+});
+
+test('PB quality inspection is limited to finished units and tracks inspected progress', function () {
+    $admin = User::factory()->admin()->create();
+    $order = Order::create([
+        'order_id' => 'FINISHING-QC-PROGRESS',
+        'guest_name' => 'Finishing QC Guest',
+        'total_order' => 1000000,
+        'status' => 'Dalam Perjalanan',
+    ]);
+    $item = $order->items()->create([
+        'product' => 'Finishing QC Cabinet',
+        'qty' => 100,
+        'qty_completed' => 10,
+        'packed_quantity' => 10,
+        'price' => 10000,
+        'source' => 'Order',
+        'status' => 'Dalam Perjalanan',
+        'factory_status' => 'Packing',
+    ]);
+
+    $this->actingAs($admin)
+        ->get(route('order-products.index'))
+        ->assertSeeText('Sudah Dikerjakan')
+        ->assertSeeText('Hasil pemeriksaan PB: 0/10 unit')
+        ->assertSee('data-quality-evidence-result', false)
+        ->assertSee('max="10"', false);
+
+    $this->from(route('order-products.index'))
+        ->post(route('order-products.quality.store', $item), [
+            'result' => 'Kurang',
+            'quantity' => 11,
+            'evidence' => stockProductImage('finishing-qc-over-limit.png'),
+        ])
+        ->assertSessionHasErrors('quantity');
+
+    $this->assertDatabaseHas('order_items', [
+        'id' => $item->id,
+        'packed_quantity' => 10,
+        'quality_short_quantity' => 0,
+    ]);
+
+    $this->post(route('order-products.quality.store', $item), [
+        'result' => 'Bagus',
+        'quantity' => 4,
+    ])->assertRedirect();
+
+    $item->fresh()->update([
+        'qty_completed' => 50,
+        'packed_quantity' => 46,
+    ]);
+
+    $this->get(route('order-products.index'))
+        ->assertSeeText('Hasil pemeriksaan PB: 4/50 unit')
+        ->assertSee('max="46"', false);
 });

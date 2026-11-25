@@ -6,6 +6,7 @@ use App\Models\Expense;
 use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 
 class ExpenseController extends Controller
@@ -15,12 +16,17 @@ class ExpenseController extends Controller
         $filters = $request->validate([
             'from' => ['nullable', 'date'],
             'to' => ['nullable', 'date', 'after_or_equal:from'],
+            'category' => ['nullable', Rule::in(Expense::CATEGORIES)],
         ]);
         $today = now($request->user()->timezone())->toDateString();
         $toDate = $filters['to'] ?? $today;
         $query = Expense::query()->with('createdBy:id,name')->latest('occurred_at')->latest('id');
         $unit = $request->user()->activeBusinessUnit();
         $query->where('business_unit', $unit);
+        $query->when(
+            filled($filters['category'] ?? null),
+            fn ($query) => $query->where('category', $filters['category']),
+        );
 
         if (filled($filters['from'] ?? null)) {
             $query->whereDate('occurred_at', '>=', $filters['from']);
@@ -31,6 +37,8 @@ class ExpenseController extends Controller
             'expenses' => $query->paginate(20)->withQueryString(),
             'selectedUnit' => $unit,
             'unitLabels' => $this->unitLabels(),
+            'categories' => Expense::CATEGORIES,
+            'selectedCategory' => $filters['category'] ?? '',
             'fromDate' => $filters['from'] ?? '',
             'toDate' => $toDate,
         ]);
@@ -42,6 +50,7 @@ class ExpenseController extends Controller
             'expense' => new Expense(['occurred_at' => now($request->user()->timezone())->toDateString()]),
             'isEditing' => false,
             'unitLabels' => $this->unitLabels(),
+            'categories' => Expense::CATEGORIES,
             'selectedUnit' => $request->user()->activeBusinessUnit(),
             'timezoneLabel' => $request->user()->timezoneLabel(),
         ]);
@@ -79,6 +88,7 @@ class ExpenseController extends Controller
             'expense' => $expense,
             'isEditing' => true,
             'unitLabels' => $this->unitLabels(),
+            'categories' => Expense::CATEGORIES,
             'selectedUnit' => $request->user()->activeBusinessUnit(),
         ]);
     }
@@ -111,6 +121,7 @@ class ExpenseController extends Controller
     private function validationRules(): array
     {
         $rules = [
+            'category' => ['nullable', Rule::in(Expense::CATEGORIES)],
             'description' => ['required', 'string', 'max:255'],
             'quantity' => ['required', 'numeric', 'gt:0', 'max:999999999'],
             'unit' => ['nullable', 'string', 'max:50'],
@@ -132,6 +143,7 @@ class ExpenseController extends Controller
         $unitPrice = (float) $validated['unit_price'];
 
         return [
+            'category' => $validated['category'] ?? 'Additional',
             'description' => trim($validated['description']),
             'quantity' => $quantity,
             'unit' => filled($validated['unit'] ?? null) ? trim($validated['unit']) : null,

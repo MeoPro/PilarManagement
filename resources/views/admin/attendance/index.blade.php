@@ -100,7 +100,9 @@
                                                         {{ $assignment->cancelled_at !== null ? 'Dibatalkan' : ($assignment->completed_at !== null ? 'Selesai' : 'Berjalan') }}
                                                     </span>
                                                     · SPK #{{ $assignment->orderItem->order->order_id }}
-                                                    · {{ $assignment->is_rework ? 'Finishing ulang' : 'Finishing' }}
+                                                    · {{ $assignment->is_rework
+                                                        ? ($assignment->orderItem?->factory_status === 'Service' ? 'Service PF' : 'Finishing ulang')
+                                                        : 'Finishing' }}
                                                 </summary>
                                                 <div class="piecework-assignment-detail">
                                                     <p>
@@ -160,9 +162,12 @@
                                                             value="{{ $finishingItem->id }}"
                                                             data-normal="{{ $finishingItem->finishing_quantity_available }}"
                                                             data-rework="{{ $finishingItem->rework_quantity_available }}"
+                                                            data-service="{{ $finishingItem->factory_status === 'Service' ? '1' : '0' }}"
                                                         >
                                                             #{{ $finishingItem->order->order_id }} · {{ $finishingItem->product }}
-                                                            (finishing {{ $finishingItem->finishing_quantity_available }}, rusak {{ $finishingItem->rework_quantity_available }})
+                                                            ({{ $finishingItem->factory_status === 'Service'
+                                                                ? 'Service '.$finishingItem->rework_quantity_available.' unit'
+                                                                : 'finishing '.$finishingItem->finishing_quantity_available.', rusak '.$finishingItem->rework_quantity_available }})
                                                         </option>
                                                     @endforeach
                                                 </select>
@@ -171,7 +176,7 @@
                                                 <span>Jenis tugas</span>
                                                 <select name="is_rework" required data-finishing-type>
                                                     <option value="0">Finishing baru</option>
-                                                    <option value="1">Finishing ulang produk rusak</option>
+                                                    <option value="1">Service / perbaikan produk rusak</option>
                                                 </select>
                                             </label>
                                             <label>
@@ -414,6 +419,9 @@
                                                                         name="unit_price"
                                                                         value="{{ $assignment->unit_price ?? '' }}"
                                                                         inputmode="decimal"
+                                                                        data-money-input
+                                                                        autocomplete="off"
+                                                                        required
                                                                     >
                                                                 </label>
                                                                 <label>
@@ -673,6 +681,11 @@
                 const selectedOption = product.selectedOptions[0];
                 const normalQuantity = Number.parseInt(selectedOption?.dataset.normal ?? '0', 10) || 0;
                 const reworkQuantity = Number.parseInt(selectedOption?.dataset.rework ?? '0', 10) || 0;
+                const isService = selectedOption?.dataset.service === '1';
+                type.options[0].disabled = isService;
+                if (isService) {
+                    type.value = '1';
+                }
                 if (type.value === '0' && normalQuantity === 0 && reworkQuantity > 0) {
                     type.value = '1';
                 }

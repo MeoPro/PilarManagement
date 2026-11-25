@@ -20,6 +20,7 @@
     @endif
 
     <section class="card">
+        <p><strong>Kategori:</strong> {{ $expense->category }}</p>
         <p><strong>Jumlah:</strong> {{ number_format((float) $expense->quantity, 3, ',', '.') }} {{ $expense->unit }}</p>
         <p><strong>Harga satuan:</strong> Rp {{ number_format((float) $expense->unit_price, 2, ',', '.') }}</p>
         <p><strong>Total:</strong> Rp {{ number_format((float) $expense->total, 2, ',', '.') }}</p>

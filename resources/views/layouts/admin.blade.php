@@ -29,6 +29,7 @@
             'orders' => ['group' => 'Orderan', 'label' => 'Daftar Order', 'route' => 'orders.index', 'icon' => 'orders', 'active' => 'orders.*'],
             'revenue' => ['group' => 'Finance', 'label' => 'Omzet', 'route' => 'revenue.index', 'icon' => 'reports', 'active' => 'revenue.*'],
             'products' => ['group' => 'Operasional', 'label' => 'Katalog Produk', 'route' => 'products.index', 'icon' => 'products', 'active' => 'products.*'],
+            'product_stock' => ['group' => 'Operasional', 'label' => 'Stock Produk', 'route' => 'product-stock.index', 'icon' => 'products', 'active' => 'product-stock.*'],
             'order_products' => ['group' => 'Orderan', 'label' => 'Produk Orderan', 'route' => 'order-products.index', 'icon' => 'orders', 'active' => 'order-products.*'],
             'subcontractor_products' => ['group' => 'Operasional', 'label' => 'Produk Subcon', 'route' => 'subcontractor-products.index', 'icon' => 'subcontractors', 'active' => 'subcontractor-products.*'],
             'subcontractors' => ['group' => 'Operasional', 'label' => 'Subkontraktor', 'route' => 'subcontractors.index', 'icon' => 'subcontractors', 'active' => 'subcontractors.*'],

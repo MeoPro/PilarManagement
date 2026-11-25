@@ -85,7 +85,6 @@
                         <th>Gaji Borongan</th>
                     @endif
                     <th>Sisa Gaji {{ $salaryType ?: 'Bulan Ini' }}</th>
-                    <th>Sudah Dibayar</th>
                     <th>Cashbond</th>
                     <th>Aksi</th>
                 </tr>
@@ -107,7 +106,6 @@
                             <td>Rp {{ number_format($summary['piecework_pay_total'], 0, ',', '.') }}</td>
                         @endif
                         <td><strong>Rp {{ number_format($summary['salary_due'], 0, ',', '.') }}</strong></td>
-                        <td>Rp {{ number_format($summary['salary_paid_for_type'], 0, ',', '.') }}</td>
                         <td>Rp {{ number_format((float) $employee->cashbond, 0, ',', '.') }}</td>
                         <td>
                             @if($summary['salary_due'] > 0 || (float) $employee->cashbond > 0)
@@ -175,7 +173,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr><td colspan="{{ $canSelectUnit ? ($salaryType === '' ? 10 : ($salaryType === 'Harian' ? 8 : 7)) : ($salaryType === '' ? 9 : ($salaryType === 'Harian' ? 7 : 6)) }}">Belum ada karyawan pada periode ini.</td></tr>
+                    <tr><td colspan="{{ $canSelectUnit ? ($salaryType === '' ? 9 : ($salaryType === 'Harian' ? 7 : 6)) : ($salaryType === '' ? 8 : ($salaryType === 'Harian' ? 6 : 5)) }}">Belum ada karyawan pada periode ini.</td></tr>
                 @endforelse
             </tbody>
         </table>

@@ -13,6 +13,7 @@ class OrderEvent extends Model
         'type',
         'title',
         'description',
+        'image_path',
         'occurred_at',
     ];
 

@@ -37,27 +37,33 @@
                         <th>Unit</th>
                     @endif
                     <th>Saldo</th>
-                    <th>Harga Satuan</th>
+                    <th>Harga Rata-rata</th>
                     <th>Aksi</th>
                 </tr>
             </thead>
             <tbody>
                 @forelse($materials as $material)
                     <tr>
-                        <td>{{ $material->name }}<small>{{ $material->unit ?? 'Satuan belum ditentukan' }}</small></td>
+                        <td>{{ $material->name }}</td>
                         @if(auth()->user()->isOwner())
                             <td>{{ $unitLabels[$material->business_unit] ?? $material->business_unit }}</td>
                         @endif
-                        <td>{{ number_format($material->current_stock, 3, ',', '.') }} {{ $material->unit }}</td>
-                        <td>Rp {{ number_format((float) $material->unit_price, 2, ',', '.') }}</td>
+                        <td>{{ $material->current_stock_display }} {{ $material->unit }}</td>
+                        <td>
+                            @if($material->average_unit_price !== null)
+                                Rp {{ number_format($material->average_unit_price, 2, ',', '.') }}
+                            @else
+                                —
+                            @endif
+                        </td>
                         <td>
                             <div class="order-row-actions">
-                                <a class="icon-button" href="{{ route('materials.show', $material) }}" aria-label="Lihat {{ $material->name }}" title="Lihat detail">
-                                    <x-layout.icon name="eye" />
-                                </a>
-                                <a class="icon-button" href="{{ route('materials.edit', $material) }}" aria-label="Edit {{ $material->name }}" title="Edit">
-                                    <x-layout.icon name="pencil" />
-                                </a>
+                                <a class="btn" href="{{ route('materials.show', $material) }}">Detail</a>
+                                <a class="btn" href="{{ route('materials.show', ['material' => $material, 'type' => 'in']) }}#transaction-type">Masuk</a>
+                                @if($material->current_stock > 0)
+                                    <a class="btn" href="{{ route('materials.show', ['material' => $material, 'type' => 'out']) }}#transaction-type">Keluar</a>
+                                @endif
+                                <a class="btn" href="{{ route('materials.edit', $material) }}">Edit</a>
                             </div>
                         </td>
                     </tr>

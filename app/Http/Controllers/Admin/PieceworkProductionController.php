@@ -52,7 +52,7 @@ class PieceworkProductionController extends Controller
             ]);
         }
 
-        DB::transaction(function () use ($employee, $validated): void {
+        DB::transaction(function () use ($employee, $validated, $request): void {
             $pieceworkItems = collect($validated['piecework_items']);
             $orderIds = $pieceworkItems->pluck('order_id')->unique()->sort()->values();
             $orderItemIds = $pieceworkItems->pluck('order_item_id')->unique()->sort()->values();
@@ -88,6 +88,16 @@ class PieceworkProductionController extends Controller
                 ->filter(fn (array $item): bool => filled($item['assignment_id'] ?? null))
                 ->groupBy('assignment_id')
                 ->map(fn (Collection $items): int => $items->sum(fn (array $item): int => (int) $item['quantity']));
+            $newReworkQuantitiesByItem = $pieceworkItems
+                ->filter(function (array $item) use ($assignmentsById): bool {
+                    $assignment = filled($item['assignment_id'] ?? null)
+                        ? $assignmentsById->get((int) $item['assignment_id'])
+                        : null;
+
+                    return $assignment?->is_rework === true;
+                })
+                ->groupBy('order_item_id')
+                ->map(fn (Collection $items): int => $items->sum(fn (array $item): int => (int) $item['quantity']));
 
             foreach ($pieceworkItems as $index => $item) {
                 $order = $ordersById->get((int) $item['order_id']);
@@ -109,10 +119,10 @@ class PieceworkProductionController extends Controller
                 }
 
                 if ($order->status === 'Cancel'
-                    || $orderItem->factory_status !== 'Produksi'
+                    || ! $orderItem->allowsRegularProductionAssignment()
                     || blank($orderItem->factory_drawing_image)) {
                     throw ValidationException::withMessages([
-                        "piecework_items.{$index}.order_item_id" => 'Produk hanya dapat dikerjakan setelah berstatus Produksi dan memiliki gambar kerja Pilar Factory.',
+                        "piecework_items.{$index}.order_item_id" => 'Produk hanya dapat dikerjakan setelah berstatus Siap Produksi dan memiliki gambar kerja Pilar Factory.',
                     ]);
                 }
 
@@ -124,6 +134,12 @@ class PieceworkProductionController extends Controller
                         || (int) $assignment->order_item_id !== (int) $orderItem->id)) {
                     throw ValidationException::withMessages([
                         "piecework_items.{$index}.assignment_id" => 'Penugasan tidak berlaku untuk karyawan atau produk ini.',
+                    ]);
+                }
+
+                if ($assignment?->is_rework && (int) $orderItem->quality_damaged_quantity === 0) {
+                    throw ValidationException::withMessages([
+                        "piecework_items.{$index}.assignment_id" => 'Penugasan Service tidak lagi memiliki produk rusak yang tersedia.',
                     ]);
                 }
             }
@@ -144,13 +160,16 @@ class PieceworkProductionController extends Controller
 
             foreach ($newQuantitiesByItem as $orderItemId => $newQuantity) {
                 $orderItem = $orderItemsById->get((int) $orderItemId);
-                $alreadyProduced = (int) PieceworkItem::query()
-                    ->where('order_item_id', $orderItem->id)
-                    ->sum('quantity');
-                $alreadyCountedQuantity = max($alreadyProduced, (int) $orderItem->qty_completed);
+                $reworkQuantity = (int) ($newReworkQuantitiesByItem->get((int) $orderItemId) ?? 0);
+                $regularQuantity = (int) $newQuantity - $reworkQuantity;
 
-                if ($alreadyCountedQuantity + $newQuantity
-                    > max($orderItem->factory_quantity - (int) $orderItem->quality_short_quantity, 0)) {
+                if ($reworkQuantity > (int) $orderItem->quality_damaged_quantity) {
+                    throw ValidationException::withMessages([
+                        'piecework_items' => "Jumlah produksi ulang melebihi produk rusak yang tersedia untuk {$orderItem->product}.",
+                    ]);
+                }
+
+                if ($regularQuantity > $orderItem->factory_production_qty_remaining) {
                     throw ValidationException::withMessages([
                         'piecework_items' => "Jumlah borongan melebihi sisa produk Factory untuk {$orderItem->product}.",
                     ]);
@@ -180,8 +199,16 @@ class PieceworkProductionController extends Controller
 
             foreach ($newQuantitiesByItem as $orderItemId => $newQuantity) {
                 $orderItem = $orderItemsById->get((int) $orderItemId);
+                $reworkQuantity = (int) ($newReworkQuantitiesByItem->get((int) $orderItemId) ?? 0);
+                if ($orderItem->factory_status === 'Siap Produksi') {
+                    $orderItem->update(['factory_status' => 'Produksi']);
+                }
                 $orderItem->increment('qty_completed', $newQuantity);
+                if ($reworkQuantity > 0) {
+                    $orderItem->decrement('quality_damaged_quantity', $reworkQuantity);
+                }
                 $orderItem->refresh()->synchronizeWorkflowStatuses();
+                $orderItem->refresh()->addInternalStockOutput($request->user());
 
                 $ordersById->get((int) $orderItem->order_id)?->synchronizeProductionStatusFromItems();
             }

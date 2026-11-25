@@ -47,7 +47,7 @@
                         @endif
                         <th>Jumlah Order</th>
                         <th>Sedang Dikerjakan</th>
-                        <th>Belum Dikerjakan</th>
+                        <th>{{ $factoryUser ? 'Belum Dikerjakan' : 'Sudah Dikerjakan' }}</th>
                         <th>Warna</th>
                         <th>Status Produk</th>
                         <th>Target Kirim</th>
@@ -58,7 +58,7 @@
                 </thead>
                 <tbody>
                     @forelse($items as $item)
-                        @php($factoryCompleted = $factoryUser && $item->factory_status === 'Packing')
+                        @php($factoryCompleted = $factoryUser && in_array($item->factory_status, ['Packing', 'Distribusi'], true))
                         @php($stockFactoryReady = $item->source !== 'Stock'
                             || ((int) $item->quality_unchecked_quantity === 0
                                 && (int) $item->service_quantity === 0
@@ -67,11 +67,13 @@
                             @php($itemProductStatuses = $factoryUser
                                 ? ($item->factory_status === 'Distribusi'
                                     ? ['Distribusi', 'Produksi']
+                                    : ($item->factory_status === 'Siap Produksi'
+                                        ? ['Siap Produksi', 'Produksi']
                                     : ($item->factory_status === 'Proses Kirim'
                                         ? ['Produksi', 'Proses Kirim', 'Distribusi']
                                         : ($item->factory_status === 'None'
-                                            ? ['None', 'Produksi', 'Proses Kirim']
-                                            : ['Produksi', 'Proses Kirim'])))
+                                            ? ['None', 'Siap Produksi', 'Produksi', 'Proses Kirim']
+                                            : ['Produksi', 'Proses Kirim']))))
                                 : $productStatuses)
                             <td>
                                 @if(auth()->user()->canAccessMenu('orders'))
@@ -84,6 +86,7 @@
                             <td>{{ $item->category?->name ?? '-' }}</td>
                             @if($canAssignSubcontractors)
                                 <td>
+                                    @php($hasEmployeePieceworkAssignment = $item->pieceworkAssignments->contains(fn ($assignment) => $assignment->cancelled_at === null))
                                     @forelse($item->activeSubcontractorAssignments as $assignment)
                                         <div>
                                             {{ $assignment->subcontractor->name }}
@@ -92,6 +95,9 @@
                                     @empty
                                         <span class="muted">Belum dialokasikan</span>
                                     @endforelse
+                                    @if($hasEmployeePieceworkAssignment)
+                                        <small class="muted">Produk sudah ditugaskan ke karyawan borongan; pilih subcon untuk produk lain.</small>
+                                    @endif
 
                                     @php($activePieceworkAssignments = $item->pieceworkAssignments->filter(fn ($assignment) => $assignment->completed_at === null && $assignment->cancelled_at === null))
                                     @forelse($activePieceworkAssignments as $assignment)
@@ -121,6 +127,17 @@
                                                 value="{{ old('target_quantity', $assignment->target_quantity) }}"
                                                 required
                                             >
+                                            <label class="sr-only" for="piecework-assignment-price-{{ $assignment->id }}">Harga borongan per unit untuk {{ $item->product }}</label>
+                                            <input
+                                                id="piecework-assignment-price-{{ $assignment->id }}"
+                                                type="text"
+                                                name="unit_price"
+                                                value="{{ $assignment->unit_price !== null ? number_format((float) $assignment->unit_price, 2, '.', ',') : '' }}"
+                                                inputmode="decimal"
+                                                autocomplete="off"
+                                                data-money-input
+                                                required
+                                            >
                                             <label class="sr-only" for="piecework-deadline-{{ $assignment->id }}">Deadline borongan</label>
                                             <input
                                                 id="piecework-deadline-{{ $assignment->id }}"
@@ -132,7 +149,7 @@
                                         </form>
                                     @empty
                                         @if($item->activeSubcontractorAssignments->isEmpty()
-                                            && $item->factory_status === 'Produksi'
+                                            && in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)
                                             && filled($item->factory_drawing_image)
                                             && $stockFactoryReady
                                             && $item->factory_qty_remaining > 0)
@@ -155,6 +172,17 @@
                                                     value="{{ old('target_quantity', $item->factory_qty_remaining) }}"
                                                     required
                                                 >
+                                                <label class="sr-only" for="piecework-new-price-{{ $item->id }}">Harga borongan per unit untuk {{ $item->product }}</label>
+                                                <input
+                                                    id="piecework-new-price-{{ $item->id }}"
+                                                    type="text"
+                                                    name="unit_price"
+                                                    value="{{ old('unit_price') }}"
+                                                    inputmode="decimal"
+                                                    autocomplete="off"
+                                                    data-money-input
+                                                    required
+                                                >
                                                 <label class="sr-only" for="piecework-deadline-{{ $item->id }}">Deadline borongan</label>
                                                 <input
                                                     id="piecework-deadline-{{ $item->id }}"
@@ -169,10 +197,13 @@
                                         @endif
                                     @endforelse
 
-                                    @if($item->factory_status === 'Produksi'
-                                        && filled($item->factory_drawing_image)
+                                    @if(in_array($item->factory_status, ['Siap Produksi', 'Produksi'], true)
+                                        && (filled($item->factory_drawing_image)
+                                            || filled($item->catalogProduct?->factory_mockup))
+                                        && ($item->source === 'Stock' || $item->factory_sale_price !== null)
                                         && $stockFactoryReady
-                                        && $item->factory_quantity > $item->qty_completed)
+                                        && ! $hasEmployeePieceworkAssignment
+                                        && $item->factory_qty_remaining > 0)
                                         <form action="{{ route('order-products.subcontractor-assignments.store', $item) }}" method="POST" class="compact-form">
                                             @csrf
                                             <label class="sr-only" for="subcontractor-{{ $item->id }}">Subkontraktor untuk {{ $item->product }}</label>
@@ -192,8 +223,8 @@
                                                 type="number"
                                                 name="quantity"
                                                 min="1"
-                                                max="{{ $item->factory_quantity - $item->qty_completed }}"
-                                                value="{{ old('quantity', $item->factory_quantity - $item->qty_completed) }}"
+                                                max="{{ $item->factory_qty_remaining }}"
+                                                value="{{ old('quantity', $item->factory_qty_remaining) }}"
                                                 required
                                             >
                                             <label class="sr-only" for="subcontractor-deadline-{{ $item->id }}">Deadline pekerjaan subcon</label>
@@ -218,9 +249,7 @@
                             <td>
                                 @if($factoryCompleted)
                                     {{ $item->qty_completed }}
-                                @elseif($factoryUser || $item->source === 'Stock')
-                                    {{ $item->qty_completed }}
-                                @else
+                                @elseif($factoryUser && $item->source !== 'Stock' && $item->factory_status !== 'Service')
                                     <label class="sr-only" for="qty-completed-{{ $item->id }}">Sudah dikerjakan untuk {{ $item->product }}</label>
                                     <input
                                         class="product-progress-input"
@@ -236,71 +265,100 @@
                                     @error("items.{$item->id}.qty_completed")
                                         <span class="form-error">{{ $message }}</span>
                                     @enderror
+                                @else
+                                    {{ $item->qty_completed }}
                                 @endif
                             </td>
-                            <td>{{ $factoryUser ? $item->factory_qty_remaining : $item->qty_remaining }}</td>
+                            <td>{{ $factoryUser ? $item->factory_qty_remaining : $item->finishing_completed_quantity }}</td>
                             <td>{{ $item->color ?? '-' }}</td>
                             <td>
                                 @if($factoryUser)
-                                    <strong>{{ $item->factory_status === 'None' || ($item->status === 'Produksi' && $item->source !== 'Stock' && blank($item->factory_drawing_image)) ? 'New' : $item->factory_status }}</strong>
+                                    <strong>{{ $item->factory_status === 'Distribusi'
+                                        ? 'Selesai di Factory'
+                                        : ($item->factory_status === 'None' || ($item->status === 'Produksi' && $item->source !== 'Stock' && blank($item->factory_drawing_image))
+                                            ? 'New'
+                                            : $item->factory_status) }}</strong>
                                     @if($item->factory_status === 'Produksi' && filled($item->factory_drawing_image))
                                         <p>Produksi tersisa: {{ $item->factory_qty_remaining }} unit</p>
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>
                                     @endif
-                                    @if($item->source !== 'Stock' && $item->factory_sale_price !== null)
-                                        <p>Harga jual ke PB: Rp {{ number_format((float) $item->factory_sale_price, 0, ',', '.') }} / unit</p>
+                                    @php($factorySalePrice = $item->factory_sale_price ?? $item->catalogProduct?->factory_sale_price)
+                                    @if($factorySalePrice !== null)
+                                        <p>Harga jual ke PB: Rp {{ number_format((float) $factorySalePrice, 0, ',', '.') }} / unit</p>
+                                        @php($factorySaleQuantity = $item->source === 'Stock' ? min((int) $item->stock_factory_quantity, (int) $item->qty) : (int) $item->qty)
+                                        @if($factorySaleQuantity > 0)
+                                            <p>Total harga PF: Rp {{ number_format((float) $factorySalePrice * $factorySaleQuantity, 0, ',', '.') }}</p>
+                                        @endif
                                     @endif
-                                    @if(in_array($item->status, ['Distribusi', 'Produksi'], true)
-                                        && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0)
-                                        && blank($item->factory_drawing_image))
-                                        <p class="muted">Menunggu gambar kerja PF sebelum produksi dimulai.</p>
+                                    @if(in_array($item->factory_status, ['None', 'Service', 'Siap Produksi', 'Produksi'], true))
+                                        <details class="factory-price-edit">
+                                            <summary class="icon-button" aria-label="Edit harga PF {{ $item->product }}" title="Edit harga PF">
+                                                <x-layout.icon name="pencil" />
+                                            </summary>
+                                            <form action="{{ route('order-products.factory-drawing.update', $item) }}" method="POST" class="compact-form">
+                                                @csrf
+                                                @method('PATCH')
+                                                <label class="sr-only" for="factory-sale-price-queue-{{ $item->id }}">Harga PF per unit</label>
+                                                <input
+                                                    id="factory-sale-price-queue-{{ $item->id }}"
+                                                    type="text"
+                                                    name="factory_sale_price"
+                                                    inputmode="decimal"
+                                                    data-money-input
+                                                    value="{{ $factorySalePrice !== null ? number_format((float) $factorySalePrice, 2, '.', ',') : '' }}"
+                                                >
+                                                <button type="submit" class="btn primary">Simpan harga</button>
+                                            </form>
+                                        </details>
                                     @endif
-                                    @if((int) $item->quality_damaged_quantity > 0)
-                                        <span class="stagnant-product-warning" role="alert">
-                                            {{ $item->source === 'Stock' ? 'Produk Stock rusak menunggu produksi ulang' : 'Produk rusak menunggu finishing ulang' }}: {{ $item->quality_damaged_quantity }} unit.
-                                        </span>
+                                    @if($item->source !== 'Stock' && $item->factory_status === 'None')
+                                        <p class="muted">Status tetap New sampai foto kerja PF dan harga jual ke PB tersimpan.</p>
                                     @endif
-                                    @if(in_array($item->status, ['Distribusi', 'Produksi'], true)
+                                    @if($item->source !== 'Stock'
+                                        && $item->factory_status === 'Produksi'
+                                        && $item->factory_sale_price === null)
+                                        <p class="muted">Simpan harga jual ke PB sebelum produk dialokasikan ke subcon.</p>
+                                    @endif
+                                    @if((in_array($item->status, ['Distribusi', 'Produksi'], true)
+                                            || $item->factory_status === 'Service')
                                         && ($item->source !== 'Stock' || (int) $item->quality_damaged_quantity > 0))
                                         @if($item->factory_drawing_image)
                                             <a href="{{ Storage::disk('public')->url($item->factory_drawing_image) }}" target="_blank" rel="noopener">Lihat gambar kerja</a>
-                                        @elseif($item->factory_status === 'Produksi')
-                                            <span class="muted">Belum ada gambar kerja; produk belum dapat ditugaskan.</span>
+                                        @elseif($item->factory_status === 'Produksi' || $item->status === 'Produksi')
+                                            <span class="muted">
+                                                @if($item->source !== 'Stock' && filled($item->catalogProduct?->factory_mockup))
+                                                    Mockup PF dari katalog akan digunakan jika gambar baru tidak diunggah.
+                                                @else
+                                                    Belum ada gambar kerja; produk belum dapat ditugaskan.
+                                                @endif
+                                            </span>
                                         @endif
                                         <form action="{{ route('order-products.factory-drawing.update', $item) }}" method="POST" enctype="multipart/form-data" class="compact-form">
                                             @csrf
                                             @method('PATCH')
                                             <label for="factory-drawing-{{ $item->id }}">
-                                                {{ $item->factory_drawing_image ? 'Ganti gambar kerja' : 'Unggah gambar kerja tukang' }}
+                                                {{ $item->factory_status === 'Service'
+                                                    ? 'Gambar PF (opsional untuk Service)'
+                                                    : ($item->factory_drawing_image
+                                                    ? 'Ganti gambar kerja (opsional)'
+                                                    : (filled($item->catalogProduct?->factory_mockup)
+                                                        ? 'Unggah gambar kerja baru (opsional)'
+                                                        : ($item->source === 'Stock' ? 'Unggah gambar kerja tukang' : 'Unggah gambar kerja tukang PF'))) }}
                                             </label>
                                             <input
                                                 id="factory-drawing-{{ $item->id }}"
                                                 type="file"
                                                 name="factory_drawing_image"
                                                 accept="image/jpeg,image/png,image/webp"
-                                                required
+                                                @if(blank($item->factory_drawing_image) && blank($item->catalogProduct?->factory_mockup) && $item->source === 'Stock' && $item->factory_status !== 'Service') required @endif
                                             >
                                             @error('factory_drawing_image')
                                                 <span class="form-error">{{ $message }}</span>
                                             @enderror
-                                            @if($item->source !== 'Stock')
-                                                <label for="factory-sale-price-{{ $item->id }}">Harga jual per unit ke PB (Rp)</label>
-                                                <input
-                                                    id="factory-sale-price-{{ $item->id }}"
-                                                    type="text"
-                                                    name="factory_sale_price"
-                                                    inputmode="decimal"
-                                                    data-money-input
-                                                    value="{{ old('factory_sale_price', $item->factory_sale_price !== null ? number_format((float) $item->factory_sale_price, 2, '.', ',') : '') }}"
-                                                    required
-                                                >
-                                                @error('factory_sale_price')
-                                                    <span class="form-error">{{ $message }}</span>
-                                                @enderror
+                                            @if($item->source !== 'Stock' && $item->factory_status === 'None')
+                                                <small>Produksi dimulai setelah gambar PF dan harga jual tersedia.</small>
                                             @endif
-                                            <button type="submit" class="btn primary">
-                                                {{ $item->source === 'Stock' ? 'Simpan gambar kerja' : 'Simpan gambar dan harga ke PB' }}
-                                            </button>
+                                            <button type="submit" class="btn primary">Simpan gambar PF</button>
                                         </form>
                                     @elseif($item->factory_status === 'Finishing')
                                         <p>Finishing tersedia: {{ $item->finishing_quantity_available }} unit</p>
@@ -331,20 +389,25 @@
                                         </div>
                                     @endif
                                 @elseif($item->status === 'Dalam Perjalanan')
-                                    <p>Belum diperiksa: {{ $item->quality_unchecked_quantity }} / {{ $item->qty }} unit</p>
-                                    @if((int) $item->packed_quantity > 0 || $item->quality_shortage_available > 0)
-                                        <form action="{{ route('order-products.quality.store', $item) }}" method="POST" class="compact-form">
+                                    <p>Hasil pemeriksaan PB: {{ $item->quality_inspected_quantity }}/{{ $item->finishing_completed_quantity }} unit</p>
+                                    @if($item->quality_inspection_available_quantity > 0)
+                                        <form action="{{ route('order-products.quality.store', $item) }}" method="POST" enctype="multipart/form-data" class="compact-form" data-quality-evidence-form>
                                             @csrf
                                             <label for="quality-result-{{ $item->id }}">Hasil pemeriksaan</label>
-                                            <select id="quality-result-{{ $item->id }}" name="result" required>
+                                            <select id="quality-result-{{ $item->id }}" name="result" required data-quality-evidence-result>
                                                 <option value="Bagus">Bagus</option>
                                                 <option value="Rusak">Rusak</option>
                                                 <option value="Kurang">Kurang (service Bali)</option>
                                             </select>
                                             <label for="quality-quantity-{{ $item->id }}">Jumlah</label>
-                                            <input id="quality-quantity-{{ $item->id }}" type="number" name="quantity" min="1" max="{{ $item->quality_unchecked_quantity }}" required>
+                                            <input id="quality-quantity-{{ $item->id }}" type="number" name="quantity" min="1" max="{{ $item->quality_inspection_available_quantity }}" required>
                                             <label for="quality-note-{{ $item->id }}">Catatan</label>
                                             <textarea id="quality-note-{{ $item->id }}" name="note" rows="2" maxlength="1000"></textarea>
+                                            <label for="quality-evidence-{{ $item->id }}">Bukti foto (wajib untuk Rusak/Kurang)</label>
+                                            <input id="quality-evidence-{{ $item->id }}" type="file" name="evidence" accept="image/jpeg,image/png,image/webp" data-quality-evidence>
+                                            @error('evidence')
+                                                <span class="form-error">{{ $message }}</span>
+                                            @enderror
                                             <button type="submit" class="btn primary">Simpan hasil QC</button>
                                         </form>
                                     @endif
@@ -411,7 +474,9 @@
                                         <form
                                             action="{{ route('order-item-services.result.store', $service) }}"
                                             method="POST"
+                                            enctype="multipart/form-data"
                                             class="compact-form"
+                                            data-quality-evidence-form
                                         >
                                             @csrf
                                             <strong>Service {{ $service->severity }} · {{ $service->quantity }} unit</strong>
@@ -428,6 +493,11 @@
                                                 >
                                                 <button type="button" class="btn" data-service-fill-all>Semua</button>
                                             </div>
+                                            <label for="service-evidence-{{ $service->id }}">Bukti foto (wajib jika dikirim ke PF)</label>
+                                            <input id="service-evidence-{{ $service->id }}" type="file" name="evidence" accept="image/jpeg,image/png,image/webp" data-quality-evidence>
+                                            @error('evidence')
+                                                <span class="form-error">{{ $message }}</span>
+                                            @enderror
                                             <div class="stock-quality-actions">
                                                 <button class="btn primary" type="submit" name="result" value="Bagus">Bagus</button>
                                                 <button class="btn" type="submit" name="result" value="Rusak">Rusak · kirim PF</button>
@@ -474,7 +544,7 @@
                 aria-labelledby="stock-quality-dialog-title"
                 aria-describedby="stock-quality-dialog-description"
             >
-                <form method="POST" class="stock-quality-form" data-stock-quality-form>
+                <form method="POST" enctype="multipart/form-data" class="stock-quality-form" data-stock-quality-form>
                     @csrf
                     <h2 id="stock-quality-dialog-title" data-stock-quality-title>Pemeriksaan Stock</h2>
                     <p id="stock-quality-dialog-description" data-stock-quality-description></p>
@@ -503,6 +573,17 @@
                         >
                         <button type="button" class="btn" data-stock-quality-fill-all>Semua</button>
                     </div>
+                    <label for="stock-quality-dialog-evidence">Bukti foto (wajib untuk Rusak/Kurang)</label>
+                    <input
+                        id="stock-quality-dialog-evidence"
+                        type="file"
+                        name="evidence"
+                        accept="image/jpeg,image/png,image/webp"
+                        data-stock-quality-evidence
+                    >
+                    @error('evidence')
+                        <span class="form-error">{{ $message }}</span>
+                    @enderror
                     <div class="stock-quality-dialog-actions">
                         <button type="button" class="btn" data-stock-quality-close>Batal</button>
                         <button type="submit" class="btn primary" data-stock-quality-submit>Simpan hasil QC</button>

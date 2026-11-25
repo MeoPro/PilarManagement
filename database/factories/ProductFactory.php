@@ -27,6 +27,7 @@ class ProductFactory extends Factory
             'image' => null,
             'mockup' => null,
             'mockups' => [],
+            'factory_mockup' => null,
         ];
     }
 }
